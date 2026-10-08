@@ -1,0 +1,95 @@
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { apiFetch, apiUpload } from '../api/client';
+import { Note } from '../types';
+import { useAuth } from '../context/AuthContext';
+
+export function useNotes(collectionId?: string, tag?: string, search?: string) {
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+
+  const queryParams = new URLSearchParams();
+  if (collectionId) queryParams.append('collectionId', collectionId);
+  if (tag) queryParams.append('tag', tag);
+  if (search) queryParams.append('search', search);
+
+  const notesQuery = useQuery({
+    queryKey: ['notes', user?.id, collectionId, tag, search],
+    queryFn: async () => {
+      const res = await apiFetch<Note[]>(`/notes?${queryParams.toString()}`);
+      return res.data || [];
+    },
+    enabled: !!user?.id,
+  });
+
+  const createNoteMutation = useMutation({
+    mutationFn: async (payload: { title: string; content: string; collectionId?: string; tags?: string[]; fileName?: string; fileType?: string; fileData?: string }) => {
+      const res = await apiFetch<Note>('/notes', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notes'] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['tags'] });
+    },
+  });
+
+  const uploadNoteMutation = useMutation({
+    mutationFn: async ({ file, collectionId, tags }: { file: File; collectionId?: string; tags?: string[] }) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      if (collectionId) formData.append('collectionId', collectionId);
+      if (tags && tags.length > 0) formData.append('tags', JSON.stringify(tags));
+
+      const res = await apiUpload<Note>('/notes/upload', formData);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notes'] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['tags'] });
+    },
+  });
+
+  const updateNoteMutation = useMutation({
+    mutationFn: async ({ id, ...payload }: { id: string; title?: string; content?: string; collectionId?: string; tags?: string[]; fileName?: string; fileType?: string; fileData?: string }) => {
+      const res = await apiFetch<Note>(`/notes/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+      });
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notes'] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['tags'] });
+    },
+  });
+
+  const deleteNoteMutation = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await apiFetch(`/notes/${id}`, {
+        method: 'DELETE',
+      });
+      return res;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notes'] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['tags'] });
+    },
+  });
+
+  return {
+    notes: notesQuery.data || [],
+    isLoading: notesQuery.isLoading,
+    isError: notesQuery.isError,
+    refetch: notesQuery.refetch,
+    createNote: createNoteMutation.mutateAsync,
+    uploadNote: uploadNoteMutation.mutateAsync,
+    updateNote: updateNoteMutation.mutateAsync,
+    deleteNote: deleteNoteMutation.mutateAsync,
+  };
+}

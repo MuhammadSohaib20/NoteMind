@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+**/dist/
+build/
+
+# Environment variables & local configuration
+.env
+.env.local
+.env.*.local
+
+# Database / local data files
+.pglite-data*
+.pglite-debug*
+backups/
+
+# Scratch & logs
+scratch/
+*.log
+npm-debug.log*
+
+# System files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
