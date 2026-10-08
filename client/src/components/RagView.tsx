@@ -48,7 +48,7 @@ export const RagView: React.FC<RagViewProps> = ({
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
-  const displayName = user?.fullName || 'Muhammad Sohaib';
+  const displayName = user?.fullName || (user?.email ? user.email.split('@')[0] : 'Guest User');
   const initials = displayName
     .split(' ')
     .map((n) => n[0])

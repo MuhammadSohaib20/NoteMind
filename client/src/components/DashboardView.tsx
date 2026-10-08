@@ -71,7 +71,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const { user } = useAuth();
   const [menuOpenNoteId, setMenuOpenNoteId] = useState<string | null>(null);
 
-  const displayName = user?.fullName || 'Muhammad Sohaib';
+  const displayName = user?.fullName || (user?.email ? user.email.split('@')[0] : 'Guest User');
   const initials = displayName
     .split(' ')
     .map((n) => n[0])

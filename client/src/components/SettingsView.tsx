@@ -7,7 +7,7 @@ export const SettingsView: React.FC = () => {
   const { user, updateProfile, updatePassword } = useAuth();
   const [activeTab, setActiveTab] = useState<'profile' | 'account' | 'preferences'>('profile');
 
-  const [fullName, setFullName] = useState(user?.fullName || 'Muhammad Sohaib');
+  const [fullName, setFullName] = useState(user?.fullName || '');
   const [email, setEmail] = useState(user?.email || '');
   const [bio, setBio] = useState(user?.bio || '');
   const [avatarUrl, setAvatarUrl] = useState(user?.avatarUrl || '');
@@ -46,7 +46,7 @@ export const SettingsView: React.FC = () => {
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     updateProfile({
-      fullName: fullName.trim() || 'Muhammad Sohaib',
+      fullName: fullName.trim() || 'User',
       email: email.trim() || user?.email,
       bio: bio.trim(),
       avatarUrl,
@@ -167,7 +167,7 @@ export const SettingsView: React.FC = () => {
                     type="text"
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
-                    placeholder="Muhammad Sohaib"
+                    placeholder="Alex Morgan"
                     className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 text-xs sm:text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:border-blue-600 transition"
                   />
                 </div>
@@ -181,7 +181,7 @@ export const SettingsView: React.FC = () => {
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="sohaib.zaheer1987@gmail.com"
+                    placeholder="alex@example.com"
                     className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 text-xs sm:text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:border-blue-600 transition"
                   />
                 </div>
