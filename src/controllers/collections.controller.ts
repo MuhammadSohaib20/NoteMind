@@ -25,12 +25,13 @@ export async function listCollections(
     const db = await getDatabase();
 
     const result = await db.query(
-      `SELECT c.id, c.user_id as "userId", c.name, c.created_at as "createdAt", c.updated_at as "updatedAt",
+      `SELECT c.id, c.user_id as "userId", c.name, c.color_index as "colorIndex",
+              c.created_at as "createdAt", c.updated_at as "updatedAt",
               COUNT(n.id) as "noteCount"
        FROM "collections" c
-       LEFT JOIN "notes" n ON n.collection_id = c.id
+       LEFT JOIN "notes" n ON n.collection_id = c.id AND n.deleted_at IS NULL
        WHERE c.user_id = $1
-       GROUP BY c.id, c.user_id, c.name, c.created_at, c.updated_at
+       GROUP BY c.id, c.user_id, c.name, c.color_index, c.created_at, c.updated_at
        ORDER BY c.created_at DESC;`,
       [userId]
     );
@@ -60,12 +61,13 @@ export async function getCollectionById(
     const db = await getDatabase();
 
     const result = await db.query(
-      `SELECT c.id, c.user_id as "userId", c.name, c.created_at as "createdAt", c.updated_at as "updatedAt",
+      `SELECT c.id, c.user_id as "userId", c.name, c.color_index as "colorIndex",
+              c.created_at as "createdAt", c.updated_at as "updatedAt",
               COUNT(n.id) as "noteCount"
        FROM "collections" c
-       LEFT JOIN "notes" n ON n.collection_id = c.id
+       LEFT JOIN "notes" n ON n.collection_id = c.id AND n.deleted_at IS NULL
        WHERE c.id = $1 AND c.user_id = $2
-       GROUP BY c.id, c.user_id, c.name, c.created_at, c.updated_at;`,
+       GROUP BY c.id, c.user_id, c.name, c.color_index, c.created_at, c.updated_at;`,
       [id, userId]
     );
 
@@ -98,11 +100,24 @@ export async function createCollection(
     const { name } = req.body;
     const db = await getDatabase();
 
+    const usedColors = await db.query(
+      `SELECT color_index as "colorIndex" FROM "collections" WHERE user_id = $1;`,
+      [userId]
+    );
+    const usedColorIndexes = new Set(
+      usedColors.rows.map((row: any) => Number(row.colorIndex))
+    );
+    let colorIndex = 0;
+    while (usedColorIndexes.has(colorIndex)) {
+      colorIndex += 1;
+    }
+
     const result = await db.query(
-      `INSERT INTO "collections" (user_id, name)
-       VALUES ($1, $2)
-       RETURNING id, user_id as "userId", name, created_at as "createdAt", updated_at as "updatedAt";`,
-      [userId, name]
+      `INSERT INTO "collections" (user_id, name, color_index)
+       VALUES ($1, $2, $3)
+       RETURNING id, user_id as "userId", name, color_index as "colorIndex",
+                 created_at as "createdAt", updated_at as "updatedAt";`,
+      [userId, name, colorIndex]
     );
 
     const collection = result.rows[0] as any;
@@ -132,7 +147,8 @@ export async function updateCollection(
       `UPDATE "collections"
        SET name = $1, updated_at = CURRENT_TIMESTAMP
        WHERE id = $2 AND user_id = $3
-       RETURNING id, user_id as "userId", name, created_at as "createdAt", updated_at as "updatedAt";`,
+       RETURNING id, user_id as "userId", name, color_index as "colorIndex",
+                 created_at as "createdAt", updated_at as "updatedAt";`,
       [name, id, userId]
     );
 
@@ -143,7 +159,7 @@ export async function updateCollection(
       });
     }
 
-    const countRes = await db.query(`SELECT COUNT(*) as "noteCount" FROM "notes" WHERE collection_id = $1;`, [id]);
+    const countRes = await db.query(`SELECT COUNT(*) as "noteCount" FROM "notes" WHERE collection_id = $1 AND deleted_at IS NULL;`, [id]);
     const collection = result.rows[0] as any;
     collection.noteCount = parseInt((countRes.rows[0] as any).noteCount || '0', 10);
 
@@ -167,6 +183,13 @@ export async function deleteCollection(
     const db = await getDatabase();
 
     await db.query('BEGIN;');
+    await db.query(
+      `UPDATE "notes"
+       SET deleted_at = CURRENT_TIMESTAMP
+       WHERE collection_id = $1 AND user_id = $2 AND deleted_at IS NULL;`,
+      [id, userId]
+    );
+
     const result = await db.query(
       `DELETE FROM "collections" WHERE id = $1 AND user_id = $2 RETURNING id;`,
       [id, userId]

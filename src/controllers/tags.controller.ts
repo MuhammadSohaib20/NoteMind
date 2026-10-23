@@ -26,9 +26,10 @@ export async function listTags(
 
     const result = await db.query(
       `SELECT t.id, t.user_id as "userId", t.name, t.created_at as "createdAt",
-              COUNT(nt.note_id) as "noteCount"
+              COUNT(n.id) as "noteCount"
        FROM "tags" t
        LEFT JOIN "note_tags" nt ON nt.tag_id = t.id
+       LEFT JOIN "notes" n ON n.id = nt.note_id AND n.deleted_at IS NULL
        WHERE t.user_id = $1
        GROUP BY t.id, t.user_id, t.name, t.created_at
        ORDER BY t.name ASC;`,
@@ -68,9 +69,10 @@ export async function createTag(
 
     const existing = await db.query(
       `SELECT t.id, t.user_id as "userId", t.name, t.created_at as "createdAt", t.updated_at as "updatedAt",
-              COUNT(nt.note_id) as "noteCount"
+              COUNT(n.id) as "noteCount"
        FROM "tags" t
        LEFT JOIN "note_tags" nt ON nt.tag_id = t.id
+       LEFT JOIN "notes" n ON n.id = nt.note_id AND n.deleted_at IS NULL
        WHERE t.user_id = $1 AND LOWER(t.name) = LOWER($2)
        GROUP BY t.id, t.user_id, t.name, t.created_at, t.updated_at;`,
       [userId, name]
@@ -137,7 +139,12 @@ export async function updateTag(
       });
     }
 
-    const countRes = await db.query(`SELECT COUNT(*) as "noteCount" FROM "note_tags" WHERE tag_id = $1;`, [id]);
+    const countRes = await db.query(
+      `SELECT COUNT(n.id) as "noteCount"
+       FROM "note_tags" nt JOIN "notes" n ON n.id = nt.note_id
+       WHERE nt.tag_id = $1 AND n.deleted_at IS NULL;`,
+      [id]
+    );
     const tag = result.rows[0] as any;
     tag.noteCount = parseInt((countRes.rows[0] as any).noteCount || '0', 10);
 
