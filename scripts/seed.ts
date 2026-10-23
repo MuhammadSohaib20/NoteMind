@@ -36,10 +36,10 @@ export async function seedDatabase(count: number = 5000, db?: any) {
   // 2. Create Collections
   const colNames = ['8-Week Internship Notes', 'RAG & AI Architecture', 'Database Systems', 'Express API Specs'];
   const collectionIds: string[] = [];
-  for (const name of colNames) {
+  for (const [colorIndex, name] of colNames.entries()) {
     const res = await db.query(
-      `INSERT INTO "collections" (user_id, name) VALUES ($1, $2) RETURNING id;`,
-      [user.id, name]
+      `INSERT INTO "collections" (user_id, name, color_index) VALUES ($1, $2, $3) RETURNING id;`,
+      [user.id, name, colorIndex]
     );
     collectionIds.push((res.rows[0] as any).id);
   }

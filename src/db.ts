@@ -21,10 +21,24 @@ async function initializeDatabase(dataDir: string): Promise<PGlite> {
 
       await db.exec('CREATE EXTENSION IF NOT EXISTS vector;');
 
-      const migrationPath = path.join(__dirname, '../prisma/migrations/0_init/migration.sql');
-      if (fs.existsSync(migrationPath)) {
-        const migrationSql = fs.readFileSync(migrationPath, 'utf8');
-        await db.exec(migrationSql);
+      const migrationsPath = path.join(__dirname, '../prisma/migrations');
+      if (fs.existsSync(migrationsPath)) {
+        const migrationFiles = fs.readdirSync(migrationsPath)
+          .sort()
+          .flatMap((entry) => {
+            const entryPath = path.join(migrationsPath, entry);
+            if (fs.statSync(entryPath).isDirectory()) {
+              return fs.readdirSync(entryPath)
+                .filter((file) => file.endsWith('.sql'))
+                .sort()
+                .map((file) => path.join(entryPath, file));
+            }
+            return entry.endsWith('.sql') ? [entryPath] : [];
+          });
+        for (const migrationFile of migrationFiles) {
+          const migrationSql = fs.readFileSync(migrationFile, 'utf8');
+          await db.exec(migrationSql);
+        }
       }
 
       return db;

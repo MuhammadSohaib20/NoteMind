@@ -44,9 +44,23 @@ CREATE TABLE IF NOT EXISTS public.collections (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE ON UPDATE CASCADE,
     name VARCHAR(255) NOT NULL,
+    color_index INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE public.collections ADD COLUMN IF NOT EXISTS color_index INTEGER;
+WITH ranked_collections AS (
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at, id) - 1 AS color_index
+    FROM public.collections
+)
+UPDATE public.collections AS collection
+SET color_index = ranked_collections.color_index
+FROM ranked_collections
+WHERE collection.id = ranked_collections.id AND collection.color_index IS NULL;
+ALTER TABLE public.collections ALTER COLUMN color_index SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS collections_user_id_color_index_key
+    ON public.collections(user_id, color_index);
 
 -- Table: notes
 CREATE TABLE IF NOT EXISTS public.notes (
@@ -55,9 +69,20 @@ CREATE TABLE IF NOT EXISTS public.notes (
     collection_id UUID REFERENCES public.collections(id) ON DELETE SET NULL ON UPDATE CASCADE,
     title VARCHAR(255) NOT NULL,
     content TEXT NOT NULL,
+    file_name VARCHAR(255),
+    file_type VARCHAR(100),
+    file_data TEXT,
+    file_preview TEXT,
+    deleted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS file_preview TEXT;
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS file_name VARCHAR(255);
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS file_type VARCHAR(100);
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS file_data TEXT;
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 
 -- Table: tags
 CREATE TABLE IF NOT EXISTS public.tags (
@@ -91,6 +116,7 @@ CREATE INDEX IF NOT EXISTS idx_collections_user_id ON public.collections(user_id
 CREATE INDEX IF NOT EXISTS idx_notes_user_id ON public.notes(user_id);
 CREATE INDEX IF NOT EXISTS idx_notes_collection_id ON public.notes(collection_id);
 CREATE INDEX IF NOT EXISTS idx_notes_created_at ON public.notes(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notes_user_id_deleted_at ON public.notes(user_id, deleted_at);
 CREATE INDEX IF NOT EXISTS idx_tags_user_id ON public.tags(user_id);
 CREATE INDEX IF NOT EXISTS idx_note_embeddings_note_id ON public.note_embeddings(note_id);
 

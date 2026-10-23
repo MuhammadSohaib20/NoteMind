@@ -17,11 +17,13 @@ CREATE TABLE IF NOT EXISTS "collections" (
     "id" UUID NOT NULL DEFAULT gen_random_uuid(),
     "user_id" UUID NOT NULL,
     "name" VARCHAR(255) NOT NULL,
+    "color_index" INTEGER NOT NULL DEFAULT 0,
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updated_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT "collections_pkey" PRIMARY KEY ("id")
 );
+
 
 -- Create Table notes
 CREATE TABLE IF NOT EXISTS "notes" (
@@ -42,6 +44,8 @@ CREATE TABLE IF NOT EXISTS "notes" (
 ALTER TABLE "notes" ADD COLUMN IF NOT EXISTS "file_name" VARCHAR(255);
 ALTER TABLE "notes" ADD COLUMN IF NOT EXISTS "file_type" VARCHAR(100);
 ALTER TABLE "notes" ADD COLUMN IF NOT EXISTS "file_data" TEXT;
+ALTER TABLE "notes" ADD COLUMN IF NOT EXISTS "file_preview" TEXT;
+ALTER TABLE "notes" ADD COLUMN IF NOT EXISTS "deleted_at" TIMESTAMP(3);
 
 -- Create Table tags
 CREATE TABLE IF NOT EXISTS "tags" (

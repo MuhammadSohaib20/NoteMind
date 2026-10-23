@@ -24,16 +24,18 @@ model User {
 }
 
 model Collection {
-  id        String   @id @default(uuid()) @db.Uuid
-  userId    String   @map("user_id") @db.Uuid
-  name      String   @db.VarChar(255)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  name       String   @db.VarChar(255)
+  colorIndex Int      @map("color_index")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
 
   user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   notes Note[]
 
   @@index([userId])
+  @@unique([userId, colorIndex])
   @@map("collections")
 }
 
@@ -43,6 +45,8 @@ model Note {
   collectionId String?  @map("collection_id") @db.Uuid
   title        String   @db.VarChar(255)
   content      String   @db.Text
+  filePreview  String?  @map("file_preview") @db.Text
+  deletedAt    DateTime? @map("deleted_at")
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
@@ -88,10 +92,20 @@ model NoteEmbedding {
   noteId       String                      @map("note_id") @db.Uuid
   chunkContent String?                     @map("chunk_content") @db.Text
   embedding    Unsupported("vector(768)")?
+  /// Model id that produced this vector. Used to scope searches to a single
+  /// embedding space so a partial re-embed can never mix incompatible vectors.
+  embeddingModel String?                   @map("embedding_model")
+  embeddingDim   Int?                      @map("embedding_dim")
+  chunkIndex     Int                       @default(0) @map("chunk_index")
+  /// Hash of the embedded text, used to skip re-embedding unchanged content.
+  contentHash    String?                   @map("content_hash")
   createdAt    DateTime                    @default(now()) @map("created_at")
 
   note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
 
+  @@unique([noteId, chunkIndex])
   @@index([noteId])
+  @@index([embeddingModel])
+  @@index([contentHash])
   @@map("note_embeddings")
 }

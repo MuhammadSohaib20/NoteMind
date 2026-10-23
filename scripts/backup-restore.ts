@@ -86,10 +86,14 @@ export async function runBackupAndRestoreDrill() {
     );
   }
 
+  const nextColorIndexByUser = new Map<string, number>();
   for (const collection of collections) {
+    const fallbackColorIndex = nextColorIndexByUser.get(collection.user_id) || 0;
+    const colorIndex = collection.color_index ?? fallbackColorIndex;
+    nextColorIndexByUser.set(collection.user_id, Math.max(fallbackColorIndex, colorIndex + 1));
     await restoredDb.query(
-      `INSERT INTO "collections" (id, user_id, name, created_at, updated_at) VALUES ($1, $2, $3, $4, $5);`,
-      [collection.id, collection.user_id, collection.name, collection.created_at, collection.updated_at]
+      `INSERT INTO "collections" (id, user_id, name, color_index, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6);`,
+      [collection.id, collection.user_id, collection.name, colorIndex, collection.created_at, collection.updated_at]
     );
   }
 

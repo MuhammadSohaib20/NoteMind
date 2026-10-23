@@ -32,9 +32,23 @@ CREATE TABLE IF NOT EXISTS public.collections (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE ON UPDATE CASCADE,
     name VARCHAR(255) NOT NULL,
+    color_index INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE public.collections ADD COLUMN IF NOT EXISTS color_index INTEGER;
+WITH ranked_collections AS (
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at, id) - 1 AS color_index
+    FROM public.collections
+)
+UPDATE public.collections AS collection
+SET color_index = ranked_collections.color_index
+FROM ranked_collections
+WHERE collection.id = ranked_collections.id AND collection.color_index IS NULL;
+ALTER TABLE public.collections ALTER COLUMN color_index SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS collections_user_id_color_index_key
+    ON public.collections(user_id, color_index);
 
 -- Table: notes
 CREATE TABLE IF NOT EXISTS public.notes (
@@ -43,9 +57,20 @@ CREATE TABLE IF NOT EXISTS public.notes (
     collection_id UUID REFERENCES public.collections(id) ON DELETE SET NULL ON UPDATE CASCADE,
     title VARCHAR(255) NOT NULL,
     content TEXT NOT NULL,
+    file_name VARCHAR(255),
+    file_type VARCHAR(100),
+    file_data TEXT,
+    file_preview TEXT,
+    deleted_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS file_preview TEXT;
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS file_name VARCHAR(255);
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS file_type VARCHAR(100);
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS file_data TEXT;
+ALTER TABLE public.notes ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
 
 -- Table: tags
 CREATE TABLE IF NOT EXISTS public.tags (
@@ -70,6 +95,10 @@ CREATE TABLE IF NOT EXISTS public.note_embeddings (
     note_id UUID NOT NULL REFERENCES public.notes(id) ON DELETE CASCADE ON UPDATE CASCADE,
     chunk_content TEXT,
     embedding vector(768),
+    embedding_model TEXT,
+    embedding_dim INTEGER,
+    chunk_index INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -79,8 +108,21 @@ CREATE INDEX IF NOT EXISTS idx_collections_user_id ON public.collections(user_id
 CREATE INDEX IF NOT EXISTS idx_notes_user_id ON public.notes(user_id);
 CREATE INDEX IF NOT EXISTS idx_notes_collection_id ON public.notes(collection_id);
 CREATE INDEX IF NOT EXISTS idx_notes_created_at ON public.notes(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notes_user_id_deleted_at ON public.notes(user_id, deleted_at);
 CREATE INDEX IF NOT EXISTS idx_tags_user_id ON public.tags(user_id);
 CREATE INDEX IF NOT EXISTS idx_note_embeddings_note_id ON public.note_embeddings(note_id);
+
+-- One embedding row per note chunk.
+CREATE UNIQUE INDEX IF NOT EXISTS note_embeddings_note_chunk_key
+    ON public.note_embeddings(note_id, chunk_index);
+
+-- Lets searches filter to vectors from the currently active embedding model,
+-- so an incomplete re-embed never mixes incompatible vector spaces.
+CREATE INDEX IF NOT EXISTS idx_note_embeddings_embedding_model
+    ON public.note_embeddings(embedding_model);
+
+CREATE INDEX IF NOT EXISTS idx_note_embeddings_content_hash
+    ON public.note_embeddings(content_hash);
 
 -- HNSW Vector Index for Fast Cosine Similarity Search
 CREATE INDEX IF NOT EXISTS idx_note_embeddings_hnsw 
@@ -110,12 +152,17 @@ BEFORE UPDATE ON public.tags
 FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- 6. Vector Similarity Search Function (Supabase RPC)
+--
+-- Searches note chunks rather than whole notes. p_embedding_model scopes the
+-- search to vectors produced by one embedding model, which keeps a partially
+-- completed re-embed from mixing incompatible vector spaces.
 
 CREATE OR REPLACE FUNCTION match_notes(
     query_embedding vector(768),
     match_threshold float DEFAULT 0.0,
     match_count int DEFAULT 5,
-    p_user_id uuid DEFAULT NULL
+    p_user_id uuid DEFAULT NULL,
+    p_embedding_model text DEFAULT NULL
 )
 RETURNS TABLE (
     id uuid,
@@ -123,6 +170,9 @@ RETURNS TABLE (
     title varchar,
     content text,
     chunk_content text,
+    chunk_index integer,
+    collection_name varchar,
+    tag_names text,
     similarity float
 )
 LANGUAGE plpgsql
@@ -135,10 +185,21 @@ BEGIN
         n.title,
         n.content,
         e.chunk_content,
+        e.chunk_index,
+        c.name AS collection_name,
+        COALESCE((
+            SELECT string_agg(DISTINCT tg.name, ',')
+            FROM public.note_tags nt
+            JOIN public.tags tg ON tg.id = nt.tag_id
+            WHERE nt.note_id = n.id
+        ), '') AS tag_names,
         (1 - (e.embedding <=> query_embedding)) AS similarity
     FROM public.note_embeddings e
     JOIN public.notes n ON n.id = e.note_id
+    LEFT JOIN public.collections c ON c.id = n.collection_id
     WHERE (p_user_id IS NULL OR n.user_id = p_user_id)
+      AND n.deleted_at IS NULL
+      AND (p_embedding_model IS NULL OR e.embedding_model = p_embedding_model)
       AND (1 - (e.embedding <=> query_embedding)) >= match_threshold
     ORDER BY e.embedding <=> query_embedding ASC
     LIMIT match_count;
