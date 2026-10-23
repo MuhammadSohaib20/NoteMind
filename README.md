@@ -107,6 +107,20 @@ npx ts-node scripts/verify-db.ts
 
 ---
 
+## 🚀 Latest Update — Real Gemini RAG + Scanned-PDF OCR
+
+The **Ask My Notes** page now runs a full retrieval-augmented generation pipeline on Google's free Gemini API (no paid tier, no credit card):
+
+- **Real embeddings** — notes are chunked (≈1200 chars, 200 overlap) and embedded with `gemini-embedding-2` (768-dim) into `note_embeddings`, with a 24 h local embedding cache.
+- **Explicit AI Index panel** — pick a collection from the dropdown, then tick exactly the notes the assistant may read for that question; the selection resets every visit so answers stay scoped to the current session.
+- **Scoped answers** — `/api/v1/rag/ask` retrieves only from the ticked notes (vector similarity + keyword fallback) and `gemini-3.8-flash` composes the answer, with a graceful `gemini-3.5-flash-lite` → Groq fallback chain.
+- **Scanned PDF & image OCR** — files without a text layer are rasterised (`pdf-to-img`) and recognised offline with `tesseract.js` and the bundled `eng.traineddata`; older "unreadable upload" placeholders self-heal when the note is re-indexed (`npm run db:ocr-heal`).
+- **Styled Markdown answers** — coloured section headings, worked examples and a Sources list, sanitised and rendered client-side (no raw `**`, `#` or LaTeX in answers).
+
+Full architecture, API payloads, tuning knobs and troubleshooting: see **[RAG.md](RAG.md)**. API specification: `openapi.yaml`.
+
+---
+
 ## 📄 License
 
 MIT License

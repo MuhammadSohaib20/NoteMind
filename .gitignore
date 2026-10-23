@@ -1,31 +1,33 @@
-# Dependencies
 node_modules/
-**/node_modules/
-
-# Build outputs
 dist/
-**/dist/
 build/
+coverage/
 
-# Environment variables & local configuration
+# Environment files - never commit real secrets
 .env
 .env.local
 .env.*.local
 
-# Database / local data files
-.pglite-data*
-.pglite-debug*
+# Local AI embedding cache
+.ai-cache/
+
+# Local database files
+.pglite-data/
+.pglite-data-debug/
+.pglite-debug2/
+
+# Backups
 backups/
 
-# Scratch & logs
-scratch/
+# Logs
 *.log
 npm-debug.log*
 
-# System files
+# OS / editor
 .DS_Store
 Thumbs.db
-
-# IDEs
 .vscode/
 .idea/
+
+# Local throwaway experiments
+scratch/
