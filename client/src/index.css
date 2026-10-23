@@ -29,3 +29,242 @@ input::-webkit-credentials-auto-fill-button {
   height: 0 !important;
 }
 
+/* ==========================================================================
+   NoteMind AI answer rendering (.rag-md, see MarkdownContent.tsx)
+   Structured, colourful output: coloured headings, highlighter bold, tables,
+   callout quotes and citation chips — no raw ** or # ever visible.
+   ========================================================================== */
+
+.rag-md {
+  font-size: 0.8125rem;
+  line-height: 1.75;
+  color: #1e293b;
+  word-break: break-word;
+}
+.rag-md > * + * {
+  margin-top: 0.7rem;
+}
+.rag-md p {
+  margin: 0.35rem 0;
+}
+
+/* Headings — each level gets its own colour so structure is obvious */
+.rag-md h1,
+.rag-md h2,
+.rag-md h3,
+.rag-md h4 {
+  font-weight: 700;
+  line-height: 1.35;
+  margin-top: 1.15rem;
+}
+.rag-md h1 {
+  font-size: 1.05rem;
+  color: #1d4ed8;
+}
+.rag-md h2 {
+  font-size: 0.975rem;
+  color: #4338ca;
+  padding: 0.3rem 0.6rem;
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0));
+  border-left: 4px solid #6366f1;
+  border-radius: 0.35rem;
+}
+.rag-md h3 {
+  font-size: 0.9rem;
+  color: #0e7490; /* cyan-700 */
+}
+.rag-md h4 {
+  font-size: 0.85rem;
+  color: #7c3aed; /* violet-600 */
+}
+
+/* Key terms — literal highlighter effect behind **bold** */
+.rag-md strong {
+  color: #0f172a;
+  font-weight: 700;
+  background: linear-gradient(transparent 55%, rgba(250, 204, 21, 0.4) 55%);
+  padding: 0 2px;
+  border-radius: 2px;
+}
+.rag-md em {
+  color: #475569;
+  font-style: italic;
+}
+
+/* Lists with coloured markers */
+.rag-md ul,
+.rag-md ol {
+  padding-left: 1.35rem;
+}
+.rag-md ul {
+  list-style: disc;
+}
+.rag-md ol {
+  list-style: decimal;
+}
+.rag-md li {
+  margin-top: 0.28rem;
+}
+.rag-md li::marker {
+  color: #6366f1;
+  font-weight: 700;
+}
+.rag-md li > ul,
+.rag-md li > ol {
+  margin-top: 0.25rem;
+}
+
+/* Quote lines — used for definitions & formulas */
+.rag-md blockquote {
+  border-left: 4px solid #818cf8;
+  background: #eef2ff;
+  color: #312e81;
+  padding: 0.5rem 0.85rem;
+  border-radius: 0 0.5rem 0.5rem 0;
+  font-weight: 500;
+}
+.rag-md blockquote p {
+  margin: 0.15rem 0;
+}
+
+/* Code */
+.rag-md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78em;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.3rem;
+  padding: 0.08rem 0.32rem;
+  color: #be185d;
+}
+.rag-md pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 0.7rem 0.9rem;
+  border-radius: 0.6rem;
+  overflow-x: auto;
+}
+.rag-md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font-size: 0.75rem;
+}
+
+/* Tables */
+.rag-md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  display: block;
+  overflow-x: auto;
+}
+.rag-md th {
+  background: #eef2ff;
+  color: #3730a3;
+  font-weight: 700;
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #e0e7ff;
+  white-space: nowrap;
+}
+.rag-md td {
+  padding: 0.4rem 0.6rem;
+  border: 1px solid #e2e8f0;
+  vertical-align: top;
+}
+.rag-md tr:nth-child(even) td {
+  background: #f8fafc;
+}
+
+.rag-md a {
+  color: #2563eb;
+  text-decoration: underline;
+}
+.rag-md hr {
+  border: none;
+  border-top: 1px solid #e2e8f0;
+  margin: 0.9rem 0;
+}
+.rag-md img {
+  max-width: 100%;
+  border-radius: 0.5rem;
+}
+
+/* ---- Dark theme (html.dark class, and forced .rag-md-dark surfaces) ---- */
+html.dark .rag-md,
+.rag-md-dark {
+  color: #e2e8f0;
+}
+html.dark .rag-md h1,
+.rag-md-dark h1 {
+  color: #93c5fd;
+}
+html.dark .rag-md h2,
+.rag-md-dark h2 {
+  color: #a5b4fc;
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.22), rgba(99, 102, 241, 0));
+  border-left-color: #818cf8;
+}
+html.dark .rag-md h3,
+.rag-md-dark h3 {
+  color: #67e8f9;
+}
+html.dark .rag-md h4,
+.rag-md-dark h4 {
+  color: #c4b5fd;
+}
+html.dark .rag-md strong,
+.rag-md-dark strong {
+  color: #f8fafc;
+  background: linear-gradient(transparent 55%, rgba(250, 204, 21, 0.3) 55%);
+}
+html.dark .rag-md em,
+.rag-md-dark em {
+  color: #94a3b8;
+}
+html.dark .rag-md li::marker,
+.rag-md-dark li::marker {
+  color: #a5b4fc;
+}
+html.dark .rag-md blockquote,
+.rag-md-dark blockquote {
+  background: rgba(99, 102, 241, 0.14);
+  color: #c7d2fe;
+  border-left-color: #a5b4fc;
+}
+html.dark .rag-md code,
+.rag-md-dark code {
+  background: #1e293b;
+  border-color: #334155;
+  color: #f9a8d4;
+}
+html.dark .rag-md pre,
+.rag-md-dark pre {
+  background: #020617;
+  border: 1px solid #1e293b;
+}
+html.dark .rag-md th,
+.rag-md-dark th {
+  background: rgba(67, 56, 202, 0.35);
+  color: #c7d2fe;
+  border-color: #3730a3;
+}
+html.dark .rag-md td,
+.rag-md-dark td {
+  border-color: #334155;
+}
+html.dark .rag-md tr:nth-child(even) td,
+.rag-md-dark tr:nth-child(even) td {
+  background: rgba(15, 23, 42, 0.6);
+}
+html.dark .rag-md a,
+.rag-md-dark a {
+  color: #60a5fa;
+}
+html.dark .rag-md hr,
+.rag-md-dark hr {
+  border-top-color: #1e293b;
+}
+

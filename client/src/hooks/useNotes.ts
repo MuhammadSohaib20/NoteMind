@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiFetch, apiUpload } from '../api/client';
-import { Note } from '../types';
+import { GENERAL_COLLECTION_FILTER, Note, IndexNotesResult } from '../types';
 import { useAuth } from '../context/AuthContext';
 
 export function useNotes(collectionId?: string, tag?: string, search?: string) {
@@ -8,7 +8,11 @@ export function useNotes(collectionId?: string, tag?: string, search?: string) {
   const { user } = useAuth();
 
   const queryParams = new URLSearchParams();
-  if (collectionId) queryParams.append('collectionId', collectionId);
+  if (collectionId === GENERAL_COLLECTION_FILTER) {
+    queryParams.append('generalOnly', 'true');
+  } else if (collectionId) {
+    queryParams.append('collectionId', collectionId);
+  }
   if (tag) queryParams.append('tag', tag);
   if (search) queryParams.append('search', search);
 
@@ -16,6 +20,15 @@ export function useNotes(collectionId?: string, tag?: string, search?: string) {
     queryKey: ['notes', user?.id, collectionId, tag, search],
     queryFn: async () => {
       const res = await apiFetch<Note[]>(`/notes?${queryParams.toString()}`);
+      return res.data || [];
+    },
+    enabled: !!user?.id,
+  });
+
+  const trashQuery = useQuery({
+    queryKey: ['trash', user?.id],
+    queryFn: async () => {
+      const res = await apiFetch<Note[]>('/notes/trash');
       return res.data || [];
     },
     enabled: !!user?.id,
@@ -77,13 +90,53 @@ export function useNotes(collectionId?: string, tag?: string, search?: string) {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['notes'] });
+      queryClient.invalidateQueries({ queryKey: ['trash', user?.id] });
       queryClient.invalidateQueries({ queryKey: ['collections'] });
       queryClient.invalidateQueries({ queryKey: ['tags'] });
     },
   });
 
+  const restoreNoteMutation = useMutation({
+    mutationFn: async (id: string) =>
+      apiFetch(`/notes/${id}/restore`, { method: 'POST' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notes'] });
+      queryClient.invalidateQueries({ queryKey: ['trash', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['tags'] });
+    },
+  });
+
+  const permanentlyDeleteNoteMutation = useMutation({
+    mutationFn: async (id: string) =>
+      apiFetch(`/notes/${id}/permanent`, { method: 'DELETE' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['trash', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['collections'] });
+      queryClient.invalidateQueries({ queryKey: ['tags'] });
+    },
+  });
+
+  const indexNotesMutation = useMutation({
+    mutationFn: async ({ noteIds, force = false }: { noteIds: string[]; force?: boolean }) => {
+      const res = await apiFetch<IndexNotesResult>('/notes/index', {
+        method: 'POST',
+        body: JSON.stringify({ noteIds, force }),
+      });
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['notes'] });
+      queryClient.invalidateQueries({ queryKey: ['trash', user?.id] });
+    },
+  });
+
   return {
     notes: notesQuery.data || [],
+    trashedNotes: trashQuery.data || [],
+    isTrashLoading: trashQuery.isLoading,
+    isTrashError: trashQuery.isError,
+    refetchTrash: trashQuery.refetch,
     isLoading: notesQuery.isLoading,
     isError: notesQuery.isError,
     refetch: notesQuery.refetch,
@@ -91,5 +144,9 @@ export function useNotes(collectionId?: string, tag?: string, search?: string) {
     uploadNote: uploadNoteMutation.mutateAsync,
     updateNote: updateNoteMutation.mutateAsync,
     deleteNote: deleteNoteMutation.mutateAsync,
+    restoreNote: restoreNoteMutation.mutateAsync,
+    permanentlyDeleteNote: permanentlyDeleteNoteMutation.mutateAsync,
+    indexNotes: indexNotesMutation.mutateAsync,
+    isIndexing: indexNotesMutation.isPending,
   };
 }

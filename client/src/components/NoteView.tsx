@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Note, Tag } from '../types';
+import { apiFetchBlob } from '../api/client';
 import {
   ArrowLeft,
   Edit3,
@@ -111,18 +112,20 @@ export const NoteView: React.FC<NoteViewProps> = ({
   // File Attachment & Original View states
   const fileName = note.fileName || note.file_name || '';
   const fileType = note.fileType || note.file_type || '';
-  const fileData = note.fileData || note.file_data || '';
+  const filePreview = note.filePreview || note.file_preview || '';
+  const [fileUrl, setFileUrl] = useState('');
+  const [fileLoadError, setFileLoadError] = useState('');
+  const [isFileLoading, setIsFileLoading] = useState(false);
 
   const ext = (fileName.split('.').pop() || '').toLowerCase();
   const mime = fileType.toLowerCase();
 
   const isImageFile =
     mime.startsWith('image/') ||
-    ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'svg', 'tiff'].includes(ext) ||
-    fileData.startsWith('data:image/');
+    ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'gif', 'svg', 'tiff'].includes(ext);
 
   const isPdfFile =
-    mime === 'application/pdf' || ext === 'pdf' || fileData.startsWith('data:application/pdf');
+    mime === 'application/pdf' || ext === 'pdf';
 
   const isWordOrOdfFile =
     ['docx', 'doc', 'odt', 'odf'].includes(ext) ||
@@ -130,7 +133,42 @@ export const NoteView: React.FC<NoteViewProps> = ({
     mime.includes('officedocument') ||
     mime.includes('opendocument');
 
-  const hasAttachedFile = Boolean(fileName || fileData);
+  const hasAttachedFile = Boolean(fileName);
+
+  useEffect(() => {
+    if (!hasAttachedFile) {
+      setFileUrl('');
+      setFileLoadError('');
+      setIsFileLoading(false);
+      return;
+    }
+
+    let isCurrent = true;
+    let objectUrl = '';
+    setFileUrl('');
+    setFileLoadError('');
+    setIsFileLoading(true);
+
+    apiFetchBlob(`/notes/${note.id}/file`)
+      .then((fileBlob) => {
+        if (!isCurrent) return;
+        objectUrl = URL.createObjectURL(fileBlob);
+        setFileUrl(objectUrl);
+      })
+      .catch((error: unknown) => {
+        if (isCurrent) {
+          setFileLoadError(error instanceof Error ? error.message : 'Unable to load original file');
+        }
+      })
+      .finally(() => {
+        if (isCurrent) setIsFileLoading(false);
+      });
+
+    return () => {
+      isCurrent = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [hasAttachedFile, note.id]);
 
   const [activeViewMode, setActiveViewMode] = useState<'original' | 'text'>(() => {
     return hasAttachedFile ? 'original' : 'text';
@@ -618,9 +656,9 @@ export const NoteView: React.FC<NoteViewProps> = ({
                 </button>
               </div>
 
-              {fileData && (
+              {fileUrl && (
                 <a
-                  href={fileData}
+                  href={fileUrl}
                   download={fileName || 'original-file'}
                   className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition shadow-sm shrink-0"
                   title="Download original file to your device"
@@ -697,9 +735,9 @@ export const NoteView: React.FC<NoteViewProps> = ({
                         </button>
 
                         {/* Download */}
-                        {fileData && (
+                        {fileUrl && (
                           <a
-                            href={fileData}
+                            href={fileUrl}
                             download={fileName || 'scanned-image.png'}
                             className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-1 transition shadow-2xs"
                           >
@@ -712,9 +750,9 @@ export const NoteView: React.FC<NoteViewProps> = ({
 
                     {/* Image Preview Window */}
                     <div className="relative border border-slate-200 dark:border-slate-800 rounded-2xl p-4 bg-slate-900/5 dark:bg-black/40 flex items-center justify-center overflow-auto min-h-[380px] max-h-[700px]">
-                      {fileData ? (
+                      {fileUrl ? (
                         <img
-                          src={fileData}
+                          src={fileUrl}
                           alt={fileName || 'Scanned note image'}
                           className="max-w-full h-auto rounded-xl transition-transform duration-200 shadow-xl object-contain cursor-zoom-in"
                           style={{
@@ -726,7 +764,7 @@ export const NoteView: React.FC<NoteViewProps> = ({
                         <div className="text-center py-12 space-y-2">
                           <ImageIcon className="w-12 h-12 text-slate-400 mx-auto" />
                           <p className="text-xs text-slate-500 font-semibold">
-                            Scanned Image file "{fileName}" is attached.
+                            {fileLoadError || (isFileLoading ? 'Loading original image...' : `Scanned image "${fileName}" is attached.`)}
                           </p>
                         </div>
                       )}
@@ -765,9 +803,9 @@ export const NoteView: React.FC<NoteViewProps> = ({
 
                       <div className="flex items-center gap-2">
 
-                        {fileData && (
+                        {fileUrl && (
                           <a
-                            href={fileData}
+                            href={fileUrl}
                             download={fileName || 'document.pdf'}
                             className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-semibold flex items-center gap-1.5 transition shadow-xs"
                           >
@@ -778,10 +816,10 @@ export const NoteView: React.FC<NoteViewProps> = ({
                       </div>
                     </div>
 
-                    {fileData ? (
+                    {fileUrl ? (
                       <div className="rounded-2xl border border-slate-200 dark:border-slate-800 overflow-hidden shadow-lg bg-slate-900">
                         <iframe
-                          src={fileData}
+                          src={fileUrl}
                           title={fileName || 'PDF Viewer'}
                           className="w-full h-[680px] border-none"
                         />
@@ -790,7 +828,7 @@ export const NoteView: React.FC<NoteViewProps> = ({
                       <div className="p-8 text-center bg-slate-50 dark:bg-slate-800/40 rounded-2xl border border-slate-200 dark:border-slate-700">
                         <FileText className="w-10 h-10 text-red-500 mx-auto mb-2" />
                         <p className="text-xs font-bold text-slate-700 dark:text-slate-300">
-                          PDF File "{fileName}" is attached.
+                          {fileLoadError || (isFileLoading ? 'Loading PDF...' : `PDF file "${fileName}" is attached.`)}
                         </p>
                       </div>
                     )}
@@ -815,9 +853,9 @@ export const NoteView: React.FC<NoteViewProps> = ({
                         </div>
                       </div>
 
-                      {fileData && (
+                      {fileUrl && (
                         <a
-                          href={fileData}
+                          href={fileUrl}
                           download={fileName || `document.${ext}`}
                           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-sm transition"
                         >
@@ -830,11 +868,20 @@ export const NoteView: React.FC<NoteViewProps> = ({
                     <div className="p-6 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl shadow-sm space-y-4">
                       <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                         <FileText className="w-4 h-4 text-blue-500" />
-                        <span>Extracted Document Reader View</span>
+                        <span>{filePreview ? 'Word Document Preview' : 'Extracted Document Text'}</span>
                       </h3>
-                      <div className="text-xs sm:text-sm text-slate-800 dark:text-slate-200 leading-relaxed font-sans whitespace-pre-wrap">
-                        {note.content}
-                      </div>
+                      {filePreview ? (
+                        <iframe
+                          title={`${fileName || note.title} preview`}
+                          sandbox=""
+                          className="w-full h-[680px] rounded-xl border border-slate-200 bg-white"
+                          srcDoc={`<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'none'"><style>body{font:15px/1.65 Arial,sans-serif;color:#1e293b;max-width:850px;margin:40px auto;padding:0 36px}img{max-width:100%;height:auto}table{border-collapse:collapse;max-width:100%}td,th{border:1px solid #cbd5e1;padding:6px 10px}blockquote{border-left:3px solid #cbd5e1;margin-left:0;padding-left:16px}pre{white-space:pre-wrap}</style></head><body>${filePreview}</body></html>`}
+                        />
+                      ) : (
+                        <div className="text-xs sm:text-sm text-slate-800 dark:text-slate-200 leading-relaxed font-sans whitespace-pre-wrap">
+                          {note.content}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}
@@ -853,9 +900,9 @@ export const NoteView: React.FC<NoteViewProps> = ({
                         </div>
                       </div>
 
-                      {fileData && (
+                      {fileUrl && (
                         <a
-                          href={fileData}
+                          href={fileUrl}
                           download={fileName || 'download'}
                           className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold flex items-center gap-2"
                         >
@@ -934,7 +981,7 @@ export const NoteView: React.FC<NoteViewProps> = ({
           )}
 
           {/* Lightbox Fullscreen Image Modal */}
-          {isLightboxOpen && fileData && (
+          {isLightboxOpen && fileUrl && (
             <div
               className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-md flex items-center justify-center p-4 cursor-zoom-out"
               onClick={() => setIsLightboxOpen(false)}
@@ -948,7 +995,7 @@ export const NoteView: React.FC<NoteViewProps> = ({
                   <X className="w-6 h-6" />
                 </button>
                 <img
-                  src={fileData}
+                  src={fileUrl}
                   alt={fileName || 'Original Image Fullscreen'}
                   className="max-w-full max-h-[85vh] object-contain rounded-xl shadow-2xl transition-transform"
                   style={{
@@ -959,7 +1006,7 @@ export const NoteView: React.FC<NoteViewProps> = ({
                   <span>{fileName}</span>
                   <span>•</span>
                   <a
-                    href={fileData}
+                    href={fileUrl}
                     download={fileName || 'image.png'}
                     className="text-blue-400 hover:underline flex items-center gap-1"
                     onClick={(e) => e.stopPropagation()}

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Collection, Tag, ViewMode } from '../types';
+import { Collection, GENERAL_COLLECTION_FILTER, Tag, ViewMode } from '../types';
 import { ThemeToggle } from './ThemeToggle';
 import { UserProfileMenu } from './UserProfileMenu';
 import {
@@ -15,6 +15,7 @@ import {
   Edit2,
   X,
 } from 'lucide-react';
+import { getCollectionColorStyles } from './collectionStyles';
 
 interface SidebarProps {
   collections: Collection[];
@@ -32,14 +33,6 @@ interface SidebarProps {
   isMobileOpen?: boolean;
   onCloseMobile?: () => void;
 }
-
-const COLLECTION_COLORS = [
-  'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  'bg-rose-500/20 text-rose-400 border-rose-500/30',
-  'bg-amber-500/20 text-amber-400 border-amber-500/30',
-  'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-  'bg-purple-500/20 text-purple-400 border-purple-500/30',
-];
 
 export const Sidebar: React.FC<SidebarProps> = ({
   collections,
@@ -145,8 +138,29 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
 
           <div className="space-y-1">
-            {collections.map((col, idx) => {
-              const colorClass = COLLECTION_COLORS[idx % COLLECTION_COLORS.length];
+            <div
+              onClick={() => {
+                onSelectCollection(GENERAL_COLLECTION_FILTER);
+                onSelectTag(null);
+                onNavigate('notes');
+                onCloseMobile?.();
+              }}
+              className={`flex items-center justify-between px-2.5 py-2 rounded-xl text-xs cursor-pointer transition ${
+                selectedCollectionId === GENERAL_COLLECTION_FILTER && activeView === 'notes'
+                  ? 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 font-semibold border border-slate-300 dark:border-slate-700'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100/70 dark:hover:bg-slate-800/50'
+              }`}
+            >
+              <div className="flex items-center gap-2.5 truncate">
+                <span className="w-5 h-5 rounded-md border border-slate-500/30 bg-slate-500/15 text-slate-500 dark:text-slate-400 flex items-center justify-center shrink-0">
+                  <Folder className="w-3 h-3" />
+                </span>
+                <span className="truncate">General</span>
+              </div>
+            </div>
+
+            {collections.map((col) => {
+              const colorStyle = getCollectionColorStyles(col.colorIndex ?? col.color_index);
               const isSelected = selectedCollectionId === col.id && activeView === 'notes';
 
               return (
@@ -165,7 +179,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 >
                   <div className="flex items-center gap-2.5 truncate">
                     <span
-                      className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 text-[10px] font-bold ${colorClass}`}
+                      style={colorStyle.sidebar}
+                      className="w-5 h-5 rounded-md border flex items-center justify-center shrink-0 text-[10px] font-bold"
                     >
                       {col.name.charAt(0).toUpperCase()}
                     </span>

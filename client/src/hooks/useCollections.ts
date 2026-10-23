@@ -52,6 +52,8 @@ export function useCollections() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['collections'] });
       queryClient.invalidateQueries({ queryKey: ['notes'] });
+      queryClient.invalidateQueries({ queryKey: ['trash', user?.id] });
+      queryClient.invalidateQueries({ queryKey: ['tags'] });
     },
   });
 

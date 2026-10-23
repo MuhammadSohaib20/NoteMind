@@ -4,10 +4,20 @@ import { RagResponse } from '../types';
 
 export function useRag() {
   const askRagMutation = useMutation({
-    mutationFn: async ({ question, topK = 3 }: { question: string; topK?: number }) => {
+    mutationFn: async ({
+      question,
+      topK = 3,
+      collectionIds,
+      noteIds,
+    }: {
+      question: string;
+      topK?: number;
+      collectionIds?: string[];
+      noteIds?: string[];
+    }) => {
       const res = await apiFetch<RagResponse>('/rag/ask', {
         method: 'POST',
-        body: JSON.stringify({ question, topK }),
+        body: JSON.stringify({ question, topK, collectionIds, noteIds }),
       });
       return res.data;
     },

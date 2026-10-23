@@ -1,22 +1,22 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Brain,
   Send,
   Sparkles,
   FileText,
-  Folder,
-  Tag as TagIcon,
   Copy,
   Check,
+  Search,
 } from 'lucide-react';
 import { useRag } from '../hooks/useRag';
+import { useNotes } from '../hooks/useNotes';
 import { useAuth } from '../context/AuthContext';
-import { Note, Collection, Tag } from '../types';
+import { Note, Collection } from '../types';
+import { MarkdownContent } from './MarkdownContent';
 
 interface RagViewProps {
   notes: Note[];
   collections: Collection[];
-  tags: Tag[];
   onSelectNote: (note: Note) => void;
 }
 
@@ -33,22 +33,28 @@ interface ChatTurn {
   }[];
 }
 
-export const RagView: React.FC<RagViewProps> = ({
-  notes,
-  collections,
-  tags,
-  onSelectNote,
-}) => {
+/** POST /notes/index accepts at most 50 ids per request. */
+const INDEX_BATCH_SIZE = 50;
+
+export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNote }) => {
   const { user } = useAuth();
   const { askRag, isAsking, error } = useRag();
+  const { indexNotes } = useNotes();
 
   const [question, setQuestion] = useState('');
-  const [selectedCollectionFilter, setSelectedCollectionFilter] = useState<string>('all');
-  const [checkedCollections, setCheckedCollections] = useState<Record<string, boolean>>({});
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
-  const displayName = user?.fullName || (user?.email ? user.email.split('@')[0] : 'Guest User');
+  // AI Index panel state. The selection is intentionally NOT persisted: every
+  // visit starts fresh, so the assistant only ever analyses the notes the
+  // user ticked for the current session.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [indexingIds, setIndexingIds] = useState<Set<string>>(new Set());
+  const [noteFilter, setNoteFilter] = useState('');
+  const [collectionFilter, setCollectionFilter] = useState<string>('all');
+  const [indexError, setIndexError] = useState<string | null>(null);
+
+  const displayName = user?.fullName || 'Muhammad Sohaib';
   const initials = displayName
     .split(' ')
     .map((n) => n[0])
@@ -56,17 +62,89 @@ export const RagView: React.FC<RagViewProps> = ({
     .toUpperCase()
     .slice(0, 2);
 
-  const isCollectionChecked = (colId: string) => {
-    if (checkedCollections[colId] === undefined) return true;
-    return checkedCollections[colId];
+  // Notes listed in the panel: scoped by the collection dropdown, then by the
+  // text filter — this is the "pick the specific notes" selector.
+  const listedNotes = useMemo(() => {
+    const q = noteFilter.trim().toLowerCase();
+    return notes.filter((note) => {
+      if (collectionFilter === 'none') {
+        if (note.collectionId) return false;
+      } else if (collectionFilter !== 'all') {
+        if (note.collectionId !== collectionFilter) return false;
+      }
+      return !q || note.title.toLowerCase().includes(q);
+    });
+  }, [notes, noteFilter, collectionFilter]);
+
+  const listedReadyCount = listedNotes.filter((n) => n.indexed).length;
+  const hasUncategorizedNotes = notes.some((n) => !n.collectionId);
+
+  const markIndexing = (ids: string[], on: boolean) => {
+    setIndexingIds((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (on) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
   };
 
-  const toggleCollectionSource = (colId: string) => {
-    setCheckedCollections((prev) => ({
-      ...prev,
-      [colId]: !isCollectionChecked(colId),
-    }));
+  const runIndexing = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    markIndexing(ids, true);
+    setIndexError(null);
+    try {
+      const batches: string[][] = [];
+      for (let i = 0; i < ids.length; i += INDEX_BATCH_SIZE) {
+        batches.push(ids.slice(i, i + INDEX_BATCH_SIZE));
+      }
+      await Promise.all(batches.map((batch) => indexNotes({ noteIds: batch })));
+    } catch {
+      setIndexError('Some notes could not be indexed. Check the server (GEMINI_API_KEY) and try again.');
+    } finally {
+      markIndexing(ids, false);
+    }
   };
+
+  // Ticking a note = "the AI may analyse this note". Unticked notes are
+  // excluded from the search; unindexed notes get embedded right now.
+  const toggleNoteIndex = (note: Note) => {
+    const isSelected = selectedIds.has(note.id);
+    if (isSelected) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        next.delete(note.id);
+        return next;
+      });
+      return;
+    }
+    setSelectedIds((prev) => new Set(prev).add(note.id));
+    if (!note.indexed) {
+      void runIndexing([note.id]);
+    }
+  };
+
+  const selectAllShown = () => {
+    const shownIds = listedNotes.map((n) => n.id);
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      for (const id of shownIds) next.add(id);
+      return next;
+    });
+    const toIndex = listedNotes.filter((n) => !n.indexed).map((n) => n.id);
+    void runIndexing(toIndex);
+  };
+
+  const clearSelection = () => {
+    setSelectedIds(new Set());
+  };
+
+  // Scope: only the ticked notes are searched. Nothing ticked = search all
+  // indexed notes (the panel hint explains this). The backend caps noteIds
+  // at 200, so oversized selections are trimmed to that.
+  const scopedNoteIds =
+    selectedIds.size > 0 ? Array.from(selectedIds).slice(0, 200) : undefined;
 
   const submitQuestion = async (qText: string) => {
     const trimmed = qText.trim();
@@ -74,7 +152,7 @@ export const RagView: React.FC<RagViewProps> = ({
     setQuestion('');
 
     try {
-      const res = await askRag({ question: trimmed, topK: 4 });
+      const res = await askRag({ question: trimmed, topK: 4, noteIds: scopedNoteIds });
       if (res) {
         setChatHistory((prev) => [
           ...prev,
@@ -125,13 +203,12 @@ export const RagView: React.FC<RagViewProps> = ({
   ];
 
   return (
-    <div className="flex-1 bg-[#F8FAFC] dark:bg-[#0F172A] flex flex-col h-screen overflow-hidden transition-colors">
+    <div className="flex-1 min-h-0 bg-[#F8FAFC] dark:bg-[#0F172A] flex flex-col h-full overflow-hidden transition-colors">
 
-
-      {/* Main Content + Right Filter Panel */}
-      <div className="flex-1 flex overflow-hidden">
+      {/* Main Content + Right AI Index Panel */}
+      <div className="flex-1 min-h-0 min-w-0 flex overflow-hidden">
         {/* Center Chat Area */}
-        <div className="flex-1 flex flex-col p-4 sm:p-6 overflow-hidden">
+        <div className="flex-1 min-w-0 flex flex-col p-3 sm:p-5 overflow-hidden">
           <div className="flex-1 bg-slate-100/70 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800 rounded-2xl flex flex-col overflow-hidden">
             {/* Scrollable Messages / Welcome View */}
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
@@ -143,7 +220,7 @@ export const RagView: React.FC<RagViewProps> = ({
                   <p className="text-sm font-semibold text-slate-700 dark:text-slate-300 leading-relaxed">
                     Hi! I can help you find information from your notes.
                     <br />
-                    Ask me anything...
+                    Tick the notes on the right for me to analyse, then ask away...
                   </p>
 
                   {/* Preset Prompt Buttons */}
@@ -162,7 +239,7 @@ export const RagView: React.FC<RagViewProps> = ({
                   </div>
                 </div>
               ) : (
-                <div className="space-y-6 max-w-3xl mx-auto w-full">
+                <div className="space-y-6 max-w-5xl mx-auto w-full">
                   {chatHistory.map((turn, idx) => (
                     <div key={idx} className="space-y-3">
                       {/* User Question Bubble */}
@@ -198,9 +275,7 @@ export const RagView: React.FC<RagViewProps> = ({
                           </button>
                         </div>
 
-                        <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-200 leading-relaxed">
-                          {turn.answer}
-                        </p>
+                        <MarkdownContent text={turn.answer} />
 
                         {/* Source Citations */}
                         {turn.sources.length > 0 && (
@@ -261,7 +336,11 @@ export const RagView: React.FC<RagViewProps> = ({
                 type="text"
                 value={question}
                 onChange={(e) => setQuestion(e.target.value)}
-                placeholder="Ask a question about your notes..."
+                placeholder={
+                  selectedIds.size > 0
+                    ? `Ask about your ${selectedIds.size} selected note${selectedIds.size === 1 ? '' : 's'}...`
+                    : 'Ask a question about your notes...'
+                }
                 className="flex-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 text-xs sm:text-sm text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:border-blue-600 dark:focus:border-blue-400 focus:bg-white dark:focus:bg-slate-800 transition"
               />
               <button
@@ -275,72 +354,138 @@ export const RagView: React.FC<RagViewProps> = ({
           </div>
         </div>
 
-        {/* Right Sources & Search Filter Sidebar */}
-        <aside className="hidden lg:block w-68 bg-white dark:bg-slate-900 border-l border-slate-200/80 dark:border-slate-800 p-6 space-y-6 shrink-0 overflow-y-auto">
-          {/* Search in dropdown */}
-          <div>
-            <label className="block text-xs font-bold text-slate-800 dark:text-slate-200 mb-2">Search in</label>
+        {/* Right AI Index Panel — pick which notes the assistant may analyse */}
+        <aside className="hidden lg:flex lg:flex-col w-64 xl:w-72 2xl:w-80 bg-white dark:bg-slate-900 border-l border-slate-200/80 dark:border-slate-800 shrink-0">
+          <div className="p-4 xl:p-5 border-b border-slate-100 dark:border-slate-800">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-bold text-slate-800 dark:text-slate-200">
+                <Sparkles className="w-4 h-4 text-violet-500 dark:text-violet-400" />
+                <span>AI Index</span>
+              </div>
+              <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
+                {listedReadyCount}/{listedNotes.length} ready
+              </span>
+            </div>
+
+            {/* Collection dropdown — scope the note list to one collection */}
             <select
-              value={selectedCollectionFilter}
-              onChange={(e) => setSelectedCollectionFilter(e.target.value)}
-              className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:border-blue-600 dark:focus:border-blue-400 cursor-pointer transition"
+              value={collectionFilter}
+              onChange={(e) => setCollectionFilter(e.target.value)}
+              className="w-full mt-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:border-violet-600 dark:focus:border-violet-400 cursor-pointer transition"
             >
-              <option value="all">All Collections</option>
+              <option value="all">📁 All Collections</option>
               {collections.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name}
+                  📁 {c.name}
                 </option>
               ))}
+              {hasUncategorizedNotes && <option value="none">📄 Uncategorized</option>}
             </select>
+
+            {/* Filter box */}
+            <div className="relative mt-2.5">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+              <input
+                type="text"
+                value={noteFilter}
+                onChange={(e) => setNoteFilter(e.target.value)}
+                placeholder="Find a note..."
+                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg pl-8 pr-3 py-2 text-xs text-slate-700 dark:text-slate-200 placeholder-slate-400 focus:outline-none focus:border-violet-500 transition"
+              />
+            </div>
+
+            <div className="flex items-center justify-between mt-2.5">
+              <button
+                type="button"
+                onClick={selectAllShown}
+                disabled={listedNotes.length === 0}
+                className="text-[11px] font-semibold text-violet-600 dark:text-violet-400 hover:underline disabled:opacity-40 disabled:hover:no-underline"
+              >
+                ✓ Select shown
+              </button>
+              <button
+                type="button"
+                onClick={clearSelection}
+                disabled={selectedIds.size === 0}
+                className="text-[11px] font-medium text-slate-400 dark:text-slate-500 hover:text-slate-600 dark:hover:text-slate-300 disabled:opacity-40 disabled:hover:no-underline"
+              >
+                ✕ Clear
+              </button>
+            </div>
           </div>
 
-          {/* Sources Checkboxes */}
-          <div>
-            <label className="block text-xs font-bold text-slate-800 dark:text-slate-200 mb-3">Sources</label>
-            <div className="space-y-2.5">
-              {collections.length === 0 ? (
-                <p className="text-xs text-slate-400 dark:text-slate-500 italic">All notes included</p>
-              ) : (
-                collections.map((col) => (
+          {/* Scrollable note checklist */}
+          <div className="flex-1 overflow-y-auto p-2 space-y-1">
+            {notes.length === 0 ? (
+              <p className="text-xs text-slate-400 dark:text-slate-500 italic p-3 leading-relaxed">
+                No notes yet. Create notes in My Notes, then tick them here so I can analyse them.
+              </p>
+            ) : listedNotes.length === 0 ? (
+              <p className="text-xs text-slate-400 dark:text-slate-500 italic p-3 leading-relaxed">
+                No notes here{noteFilter ? ` matching "${noteFilter}"` : ' in this collection'}.
+              </p>
+            ) : (
+              listedNotes.map((note) => {
+                const isIndexingNow = indexingIds.has(note.id);
+                return (
                   <label
-                    key={col.id}
-                    className="flex items-center gap-2.5 cursor-pointer select-none text-xs text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
+                    key={note.id}
+                    className="flex items-start gap-2.5 p-2 rounded-lg cursor-pointer select-none hover:bg-slate-50 dark:hover:bg-slate-800/60 transition"
                   >
                     <input
                       type="checkbox"
-                      checked={isCollectionChecked(col.id)}
-                      onChange={() => toggleCollectionSource(col.id)}
-                      className="w-4 h-4 rounded border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-blue-600 focus:ring-blue-500"
+                      checked={selectedIds.has(note.id)}
+                      onChange={() => toggleNoteIndex(note)}
+                      className="mt-0.5 w-4 h-4 rounded border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-violet-600 focus:ring-violet-500 shrink-0"
                     />
-                    <Folder className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 shrink-0" />
-                    <span className="truncate">{col.name}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-xs font-medium text-slate-700 dark:text-slate-300 truncate">
+                        {note.title}
+                      </span>
+                      <span className="mt-0.5 flex items-center gap-1 text-[10px]">
+                        {isIndexingNow ? (
+                          <>
+                            <span className="w-2.5 h-2.5 border-[1.5px] border-violet-500 border-t-transparent rounded-full animate-spin" />
+                            <span className="text-violet-600 dark:text-violet-400 font-semibold">Indexing...</span>
+                          </>
+                        ) : note.indexed ? (
+                          <>
+                            <Check className="w-2.5 h-2.5 text-emerald-600 dark:text-emerald-400" />
+                            <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Ready</span>
+                          </>
+                        ) : (
+                          <span className="text-slate-400 dark:text-slate-500">
+                            Not indexed — indexes on tick
+                          </span>
+                        )}
+                      </span>
+                    </span>
                   </label>
-                ))
-              )}
-            </div>
+                );
+              })
+            )}
           </div>
 
-          {/* Tags Quick Ask */}
-          {tags.length > 0 && (
-            <div>
-              <label className="block text-xs font-bold text-slate-800 dark:text-slate-200 mb-2.5">
-                Ask by Tag Topic
-              </label>
-              <div className="flex flex-wrap gap-1.5">
-                {tags.map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => submitQuestion(`Summarize my notes tagged with #${t.name}`)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-blue-50 dark:bg-blue-950/50 hover:bg-blue-600 text-blue-600 dark:text-blue-400 hover:text-white text-[11px] font-medium border border-blue-200/60 dark:border-blue-800/60 transition"
-                  >
-                    <TagIcon className="w-2.5 h-2.5" />
-                    <span>#{t.name}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
+          {/* Panel footer hint + error */}
+          <div className="p-3.5 xl:p-4 border-t border-slate-100 dark:border-slate-800 space-y-2">
+            {indexError && (
+              <p className="text-[11px] text-red-500 dark:text-red-400 leading-relaxed">{indexError}</p>
+            )}
+            <p className="text-[11px] leading-relaxed text-slate-400 dark:text-slate-500">
+              {selectedIds.size > 0 ? (
+                <>
+                  I will analyse only your{' '}
+                  <span className="font-semibold text-violet-600 dark:text-violet-400">
+                    {selectedIds.size} ticked note{selectedIds.size === 1 ? '' : 's'}
+                  </span>{' '}
+                  for this session.
+                </>
+              ) : (
+                <>Nothing ticked — I will search all indexed notes.</>
+              )}{' '}
+              Your selection resets next visit.
+            </p>
+          </div>
         </aside>
       </div>
     </div>

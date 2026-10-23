@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Sparkles, Search, X, FileText, ArrowRight, Bot, Zap } from 'lucide-react';
 import { useRag } from '../hooks/useRag';
 import { Note } from '../types';
+import { MarkdownContent } from './MarkdownContent';
 
 interface RagModalProps {
   isOpen: boolean;
@@ -116,7 +117,7 @@ export const RagModal: React.FC<RagModalProps> = ({ isOpen, onClose, notes, onSe
                   <Bot className="w-4 h-4" />
                   <span>AI Synthesized Answer</span>
                 </div>
-                <p className="text-sm text-gray-200 leading-relaxed font-sans">{data.answer}</p>
+                <MarkdownContent text={data.answer} variant="dark" />
               </div>
 
               {/* Retrieved Notes Sources */}

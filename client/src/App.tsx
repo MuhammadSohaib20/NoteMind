@@ -17,7 +17,7 @@ import { UploadModal } from './components/UploadModal';
 import { useNotes } from './hooks/useNotes';
 import { useCollections } from './hooks/useCollections';
 import { useTags } from './hooks/useTags';
-import { Note, Collection, Tag, ViewMode } from './types';
+import { Note, Collection, Tag, ViewMode, GENERAL_COLLECTION_FILTER } from './types';
 import { Trash2, RotateCcw, Menu, Brain } from 'lucide-react';
 import { ThemeToggle } from './components/ThemeToggle';
 import { UserProfileMenu } from './components/UserProfileMenu';
@@ -52,9 +52,6 @@ const WorkspaceApp: React.FC = () => {
     setActiveView('dashboard');
   }, [user?.id]);
 
-  // Recently deleted notes for Trash view
-  const [trashedNotes, setTrashedNotes] = useState<Note[]>([]);
-
   // Modals State
   const [isCollectionModalOpen, setIsCollectionModalOpen] = useState(false);
   const [collectionToEdit, setCollectionToEdit] = useState<Collection | null>(null);
@@ -74,6 +71,13 @@ const WorkspaceApp: React.FC = () => {
     uploadNote,
     updateNote,
     deleteNote,
+    trashedNotes,
+    isTrashLoading,
+    isTrashError,
+    refetchTrash,
+    restoreNote,
+    permanentlyDeleteNote,
+    indexNotes,
   } = useNotes(
     selectedCollectionId || undefined,
     selectedTagName || undefined,
@@ -93,8 +97,8 @@ const WorkspaceApp: React.FC = () => {
       id: '',
       title: '',
       content: '',
-      collectionId: selectedCollectionId,
-      collection_id: selectedCollectionId,
+      collectionId: selectedCollectionId === GENERAL_COLLECTION_FILTER ? null : selectedCollectionId,
+      collection_id: selectedCollectionId === GENERAL_COLLECTION_FILTER ? null : selectedCollectionId,
       tags: selectedTagName ? [selectedTagName] : [],
     });
     setActiveView('create-note');
@@ -149,12 +153,8 @@ const WorkspaceApp: React.FC = () => {
     return created;
   };
 
-  // Delete Note Action (moves copy to Trash list and deletes from DB)
+  // Move a note to Trash.
   const handleDeleteNote = async (id: string) => {
-    const noteToTrash = allNotes.find((n) => n.id === id) || notes.find((n) => n.id === id);
-    if (noteToTrash) {
-      setTrashedNotes((prev) => [noteToTrash, ...prev.filter((n) => n.id !== id)]);
-    }
     await deleteNote(id);
     if (selectedNote?.id === id) {
       setSelectedNote(null);
@@ -162,22 +162,11 @@ const WorkspaceApp: React.FC = () => {
     }
   };
 
-  // Restore Note from Trash
+  // Restore a note without recreating it so its file and metadata remain intact.
   const handleRestoreNote = async (note: Note) => {
-    const parsedTags: string[] = (note.tags || []).map((t) =>
-      typeof t === 'string' ? t : t.name
-    );
-    const restored = await createNote({
-      title: note.title,
-      content: note.content,
-      collectionId: note.collectionId || note.collection_id || undefined,
-      tags: parsedTags,
-    });
-    setTrashedNotes((prev) => prev.filter((n) => n.id !== note.id));
-    if (restored) {
-      setSelectedNote(restored);
-      setActiveView('note-detail');
-    }
+    await restoreNote(note.id);
+    setSelectedNote(note);
+    setActiveView('note-detail');
   };
 
   // Collection Modal Actions
@@ -304,9 +293,6 @@ const WorkspaceApp: React.FC = () => {
           onNavigate={setActiveView}
           onCreateNewNote={handleCreateNewNote}
           onOpenUploadModal={() => setIsUploadModalOpen(true)}
-          onOpenNoteView={handleOpenNoteView}
-          onEditNote={handleEditNote}
-          onDeleteNote={handleDeleteNote}
           onSelectTagFilter={handleSelectTagFilter}
         />
       )}
@@ -331,6 +317,20 @@ const WorkspaceApp: React.FC = () => {
           onOpenUploadModal={() => setIsUploadModalOpen(true)}
           onOpenTagModal={() => handleOpenTagModal()}
           onUpdateNoteTags={handleUpdateNoteTags}
+          onIndexNote={async (noteId) => {
+            try {
+              await indexNotes({ noteIds: [noteId] });
+            } catch (error) {
+              console.error('Failed to index note:', error);
+            }
+          }}
+          onIndexNotes={async (noteIds) => {
+            try {
+              await indexNotes({ noteIds });
+            } catch (error) {
+              console.error('Failed to index notes:', error);
+            }
+          }}
           isLoading={isNotesLoading}
         />
       )}
@@ -384,7 +384,6 @@ const WorkspaceApp: React.FC = () => {
         <RagView
           notes={allNotes}
           collections={collections}
-          tags={tags}
           onSelectNote={handleOpenNoteView}
         />
       )}
@@ -414,11 +413,26 @@ const WorkspaceApp: React.FC = () => {
             <div>
               <h1 className="text-2xl font-bold text-slate-900 dark:text-white">Trash</h1>
               <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-1">
-                Recently deleted notes in this session can be restored or permanently removed.
+                Deleted notes stay here until you restore or permanently delete them.
               </p>
             </div>
 
-            {trashedNotes.length === 0 ? (
+            {isTrashLoading ? (
+              <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-12 text-center text-sm text-slate-500 dark:text-slate-400">
+                Loading trash...
+              </div>
+            ) : isTrashError ? (
+              <div className="bg-white dark:bg-slate-900 rounded-2xl border border-red-200 dark:border-red-900 p-8 text-center space-y-3">
+                <p className="text-sm text-red-600 dark:text-red-400">Unable to load Trash.</p>
+                <button
+                  type="button"
+                  onClick={() => void refetchTrash()}
+                  className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200"
+                >
+                  Try again
+                </button>
+              </div>
+            ) : trashedNotes.length === 0 ? (
               <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-12 text-center space-y-3">
                 <div className="w-12 h-12 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-400 dark:text-slate-500 flex items-center justify-center mx-auto">
                   <Trash2 className="w-6 h-6" />
@@ -448,12 +462,14 @@ const WorkspaceApp: React.FC = () => {
                       </button>
                       <button
                         type="button"
-                        onClick={() =>
-                          setTrashedNotes((prev) => prev.filter((n) => n.id !== note.id))
-                        }
+                        onClick={() => {
+                          if (window.confirm(`Permanently delete "${note.title}"? This cannot be undone.`)) {
+                            void permanentlyDeleteNote(note.id);
+                          }
+                        }}
                         className="px-3 py-1.5 rounded-xl bg-red-50 dark:bg-red-950/50 hover:bg-red-100 dark:hover:bg-red-900/50 text-red-600 dark:text-red-400 text-xs font-semibold transition"
                       >
-                        Remove
+                        Delete permanently
                       </button>
                     </div>
                   </div>

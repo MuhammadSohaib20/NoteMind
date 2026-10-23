@@ -104,3 +104,32 @@ export async function apiUpload<T>(endpoint: string, formData: FormData): Promis
     throw error;
   }
 }
+
+export async function apiFetchBlob(endpoint: string): Promise<Blob> {
+  const token = localStorage.getItem('notemind_token');
+  const headers: Record<string, string> = {};
+
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${BASE_URL}${endpoint}`, { headers });
+  if (response.status === 401) {
+    localStorage.removeItem('notemind_token');
+    localStorage.removeItem('notemind_user');
+  }
+
+  if (!response.ok) {
+    const text = await response.text();
+    let message = `Unable to load original file (HTTP ${response.status})`;
+    try {
+      const data = JSON.parse(text) as ApiResponse;
+      message = data.error?.message || message;
+    } catch {
+      if (text) message = text.slice(0, 120);
+    }
+    throw new Error(message);
+  }
+
+  return response.blob();
+}

@@ -77,7 +77,7 @@ export const AuthModal: React.FC = () => {
       await login(demoEmail, demoPass);
     } catch {
       try {
-        await signup(demoEmail, demoPass, 'Demo User');
+        await signup(demoEmail, demoPass, 'Muhammad Sohaib');
       } catch (err: any) {
         setError(err.message || `Failed to sign in with ${provider}`);
       }

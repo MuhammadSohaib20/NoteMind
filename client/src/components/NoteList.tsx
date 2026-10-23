@@ -11,7 +11,10 @@ import {
   Plus,
   Upload,
   BookOpen,
+  Sparkles,
 } from 'lucide-react';
+import { GENERAL_COLLECTION_STYLE, getCollectionColorStyles } from './collectionStyles';
+import { GENERAL_COLLECTION_FILTER } from '../types';
 
 interface NoteListProps {
   notes: Note[];
@@ -31,16 +34,12 @@ interface NoteListProps {
   onOpenUploadModal: () => void;
   onOpenTagModal: () => void;
   onUpdateNoteTags?: (noteId: string, tags: string[]) => Promise<void>;
+  /** Explicitly index a note so the AI assistant can search it. */
+  onIndexNote?: (noteId: string) => Promise<void>;
+  /** Bulk-index several notes at once (⚡ Index all). */
+  onIndexNotes?: (noteIds: string[]) => Promise<void>;
   isLoading: boolean;
 }
-
-const ICON_COLORS = [
-  'bg-blue-100 text-blue-600 dark:bg-blue-950/60 dark:text-blue-400',
-  'bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400',
-  'bg-emerald-100 text-emerald-600 dark:bg-emerald-950/60 dark:text-emerald-400',
-  'bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400',
-  'bg-purple-100 text-purple-600 dark:bg-purple-950/60 dark:text-purple-400',
-];
 
 export const NoteList: React.FC<NoteListProps> = ({
   notes,
@@ -60,15 +59,45 @@ export const NoteList: React.FC<NoteListProps> = ({
   onOpenUploadModal,
   onOpenTagModal,
   onUpdateNoteTags,
+  onIndexNote,
+  onIndexNotes,
   isLoading,
 }) => {
   const [addingTagNoteId, setAddingTagNoteId] = useState<string | null>(null);
   const [inlineTagValue, setInlineTagValue] = useState('');
+  const [indexingNoteId, setIndexingNoteId] = useState<string | null>(null);
+  const [indexingAll, setIndexingAll] = useState(false);
 
+  const handleIndexNote = async (noteId: string) => {
+    if (!onIndexNote) return;
+    setIndexingNoteId(noteId);
+    try {
+      await onIndexNote(noteId);
+    } finally {
+      setIndexingNoteId(null);
+    }
+  };
+
+  const isGeneralSelected = selectedCollectionId === GENERAL_COLLECTION_FILTER;
   const activeCollection = collections.find((c) => c.id === selectedCollectionId);
 
+  const uniqueNotes = (items: Note[]) =>
+    Array.from(new Map(items.map((note) => [note.id, note])).values());
+  const visibleNotes = uniqueNotes(notes);
+  const unindexedVisible = visibleNotes.filter((n) => !n.indexed);
+
+  const handleIndexAllVisible = async () => {
+    if (!onIndexNotes || indexingAll || unindexedVisible.length === 0) return;
+    setIndexingAll(true);
+    try {
+      await onIndexNotes(unindexedVisible.map((n) => n.id));
+    } finally {
+      setIndexingAll(false);
+    }
+  };
+
   // Build unified tag list with accurate note counts from allNotes + tags
-  const sourceNotes = allNotes.length > 0 ? allNotes : notes;
+  const sourceNotes = uniqueNotes(allNotes.length > 0 ? allNotes : notes);
   const tagCountsMap = new Map<string, { name: string; count: number }>();
 
   for (const t of tags) {
@@ -82,7 +111,7 @@ export const NoteList: React.FC<NoteListProps> = ({
     for (const entry of tagCountsMap.values()) {
       entry.count = 0;
     }
-    for (const n of allNotes) {
+    for (const n of sourceNotes) {
       const nTags = (n.tags || []).map((t) => (typeof t === 'string' ? t : t.name)).filter(Boolean);
       for (const nt of nTags) {
         const key = nt.toLowerCase();
@@ -138,7 +167,9 @@ export const NoteList: React.FC<NoteListProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-              {activeCollection
+              {isGeneralSelected
+                ? 'General Notes'
+                : activeCollection
                 ? `${activeCollection.name} Notes`
                 : selectedTagName
                   ? `Notes Tagged #${selectedTagName}`
@@ -150,6 +181,32 @@ export const NoteList: React.FC<NoteListProps> = ({
           </div>
 
           <div className="flex items-center gap-2.5">
+            {onIndexNotes &&
+              (unindexedVisible.length === 0 ? (
+                <span className="px-3.5 py-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>All Notes Indexed for AI</span>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleIndexAllVisible}
+                  disabled={indexingAll}
+                  className="px-4 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-700 text-white text-xs font-semibold flex items-center gap-1.5 shadow-md shadow-violet-600/25 transition disabled:opacity-60"
+                  title="Embed all visible notes so the AI assistant can search them"
+                >
+                  {indexingAll ? (
+                    <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {indexingAll
+                      ? 'Indexing for AI…'
+                      : `Index ${unindexedVisible.length} Note${unindexedVisible.length > 1 ? 's' : ''} for AI`}
+                  </span>
+                </button>
+              ))}
             <button
               type="button"
               onClick={onOpenUploadModal}
@@ -200,6 +257,7 @@ export const NoteList: React.FC<NoteListProps> = ({
               className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-3.5 py-2 text-xs sm:text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:border-blue-600 dark:focus:border-blue-400 cursor-pointer transition"
             >
               <option value="">All Collections</option>
+              <option value={GENERAL_COLLECTION_FILTER}>General (No Collection)</option>
               {collections.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -285,7 +343,7 @@ export const NoteList: React.FC<NoteListProps> = ({
             <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto" />
             <p className="text-xs text-slate-500 dark:text-slate-400">Loading your notes...</p>
           </div>
-        ) : notes.length === 0 ? (
+        ) : visibleNotes.length === 0 ? (
           <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-12 text-center space-y-3">
             <div className="w-12 h-12 rounded-2xl bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 flex items-center justify-center mx-auto">
               <FileText className="w-6 h-6" />
@@ -314,8 +372,17 @@ export const NoteList: React.FC<NoteListProps> = ({
           </div>
         ) : (
           <div className="space-y-3.5">
-            {notes.map((note, idx) => {
-              const colorClass = ICON_COLORS[idx % ICON_COLORS.length];
+            {visibleNotes.map((note) => {
+              const noteCollectionId = note.collectionId || note.collection_id;
+              const collection = collections.find(
+                (collection) =>
+                  collection.id === noteCollectionId ||
+                  collection.name === (note.collectionName || note.collection_name)
+              );
+              const collectionStyle =
+                collection
+                  ? getCollectionColorStyles(collection.colorIndex ?? collection.color_index)
+                  : GENERAL_COLLECTION_STYLE;
               const collectionName =
                 note.collectionName || note.collection_name || 'General';
               const dateStr =
@@ -340,7 +407,8 @@ export const NoteList: React.FC<NoteListProps> = ({
                   <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                     <div className="flex items-start gap-4 min-w-0 flex-1">
                       <div
-                        className={`w-11 h-11 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${colorClass}`}
+                        style={collectionStyle.icon}
+                        className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 mt-0.5"
                       >
                         <Folder className="w-5 h-5 fill-current opacity-85" />
                       </div>
@@ -350,8 +418,11 @@ export const NoteList: React.FC<NoteListProps> = ({
                           <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition truncate">
                             {note.title || 'Untitled Note'}
                           </h3>
-                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-[11px] font-semibold">
-                            <Folder className="w-3 h-3 text-blue-600 dark:text-blue-400" />
+                          <span
+                            style={collectionStyle.label}
+                            className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border text-[11px] font-semibold"
+                          >
+                            <Folder className="w-3 h-3" />
                             {collectionName}
                           </span>
                           <span className="text-[11px] text-slate-400 dark:text-slate-500">
@@ -463,6 +534,36 @@ export const NoteList: React.FC<NoteListProps> = ({
                       onClick={(e) => e.stopPropagation()}
                       className="flex items-center gap-2 shrink-0 self-end sm:self-center"
                     >
+                      {onIndexNote &&
+                        (indexingNoteId === note.id ? (
+                          <span
+                            className="px-3 py-2 rounded-xl bg-violet-50 dark:bg-violet-950/60 text-violet-600 dark:text-violet-300 border border-violet-200/80 dark:border-violet-800/80 text-xs font-semibold flex items-center gap-1.5"
+                            title="Indexing this note for AI search..."
+                          >
+                            <span className="w-3 h-3 border-2 border-violet-500 border-t-transparent rounded-full animate-spin" />
+                            <span className="hidden sm:inline">Indexing…</span>
+                          </span>
+                        ) : note.indexed ? (
+                          <button
+                            type="button"
+                            onClick={() => onIndexNote(note.id)}
+                            className="px-3.5 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-600 text-emerald-600 dark:text-emerald-400 hover:text-white border border-emerald-200/80 dark:border-emerald-800/80 text-xs font-semibold flex items-center gap-1.5 transition shadow-2xs"
+                            title="Indexed for AI search — click to refresh the index"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Indexed</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => onIndexNote(note.id)}
+                            className="px-3.5 py-2 rounded-xl bg-violet-50 dark:bg-violet-950/60 hover:bg-violet-600 text-violet-600 dark:text-violet-400 hover:text-white border border-violet-200/80 dark:border-violet-800/80 text-xs font-semibold flex items-center gap-1.5 transition shadow-2xs"
+                            title="Index this note so the AI assistant can search it"
+                          >
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span className="hidden sm:inline">Index</span>
+                          </button>
+                        ))}
                       <button
                         type="button"
                         onClick={() => onSelectNote(note)}

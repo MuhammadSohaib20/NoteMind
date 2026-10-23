@@ -9,6 +9,7 @@ import {
   Edit2,
   Trash2,
 } from 'lucide-react';
+import { getCollectionColorStyles } from './collectionStyles';
 
 interface CollectionsViewProps {
   collections: Collection[];
@@ -17,14 +18,6 @@ interface CollectionsViewProps {
   onDeleteCollection: (id: string) => void;
   onSelectCollectionView: (collectionId: string) => void;
 }
-
-const CARD_STYLES = [
-  { bg: 'bg-emerald-100 text-emerald-600 dark:bg-emerald-950/60 dark:text-emerald-400', isIdea: false },
-  { bg: 'bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400', isIdea: false },
-  { bg: 'bg-purple-100 text-purple-600 dark:bg-purple-950/60 dark:text-purple-400', isIdea: false },
-  { bg: 'bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400', isIdea: true },
-  { bg: 'bg-blue-100 text-blue-600 dark:bg-blue-950/60 dark:text-blue-400', isIdea: false },
-];
 
 export const CollectionsView: React.FC<CollectionsViewProps> = ({
   collections,
@@ -80,12 +73,11 @@ export const CollectionsView: React.FC<CollectionsViewProps> = ({
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {collections.map((col, idx) => {
-              const style = CARD_STYLES[idx % CARD_STYLES.length];
+            {collections.map((col) => {
+              const style = getCollectionColorStyles(col.colorIndex ?? col.color_index);
               const count =
                 col.noteCount !== undefined ? col.noteCount : col.note_count || 0;
-              const isIdeaIcon =
-                col.name.toLowerCase().includes('idea') || style.isIdea;
+              const isIdeaIcon = col.name.toLowerCase().includes('idea');
 
               return (
                 <div
@@ -96,7 +88,8 @@ export const CollectionsView: React.FC<CollectionsViewProps> = ({
                   <div>
                     <div className="flex items-start justify-between mb-4">
                       <div
-                        className={`w-11 h-11 rounded-xl flex items-center justify-center ${style.bg}`}
+                        style={style.icon}
+                        className="w-11 h-11 rounded-xl flex items-center justify-center"
                       >
                         {isIdeaIcon ? (
                           <Lightbulb className="w-5 h-5" />
