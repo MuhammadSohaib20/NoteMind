@@ -47,15 +47,34 @@ export const aiConfig = {
    */
   maxRpm: int('AI_MAX_RPM', 10),
 
-  /** Retry attempts for transient provider failures (429 / 5xx / network). */
-  maxAttempts: int('AI_MAX_ATTEMPTS', 5),
+  /**
+   * Retry attempts for transient provider failures (429 / 5xx / network).
+   * Kept low on purpose: the free tier's primary model often reports 503
+   * "high demand", and fewer attempts hop to the healthy fallback model in
+   * seconds instead of minutes.
+   */
+  maxAttempts: int('AI_MAX_ATTEMPTS', 3),
 
   /**
    * Per-request timeout against the provider, in milliseconds. The Gemini SDK
    * has NO client-side timeout by default, so an unresponsive request would
-   * hang the RAG endpoint indefinitely.
+   * hang the RAG endpoint indefinitely. Applies to embeddings.
    */
   timeoutMs: int('AI_TIMEOUT_MS', 30000),
+
+  /**
+   * Per-attempt timeout for generation. Long answers on the free tier can
+   * legitimately take a minute, so generation gets a more generous budget
+   * than the near-instant embedding calls.
+   */
+  genTimeoutMs: int('AI_GEN_TIMEOUT_MS', 60000),
+
+  /**
+   * Hard cap for one /rag/ask generation across the whole provider chain.
+   * Past this the controller serves the extractive fallback answer, so the
+   * chat can never spin forever.
+   */
+  genDeadlineMs: int('AI_GEN_DEADLINE_MS', 120000),
 
   /**
    * Minimum cosine similarity for a chunk to be considered relevant.

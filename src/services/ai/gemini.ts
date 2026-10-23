@@ -177,7 +177,9 @@ export class GeminiGenerationProvider implements GenerationProvider {
     this.model = options.model ?? aiConfig.genModel;
     this.client = new GoogleGenAI({ apiKey: options.apiKey });
     this.limiter = new RateLimiter(options.maxRpm ?? aiConfig.maxRpm);
-    this.httpOptions = { timeout: aiConfig.timeoutMs };
+    // Generation uses its own, more generous timeout: a full-length free-tier
+    // answer can take a minute, while embeddings are near-instant.
+    this.httpOptions = { timeout: aiConfig.genTimeoutMs };
   }
 
   async generate(request: GenerationRequest): Promise<string> {

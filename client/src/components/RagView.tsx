@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Brain,
   Send,
@@ -53,6 +53,23 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   const [noteFilter, setNoteFilter] = useState('');
   const [collectionFilter, setCollectionFilter] = useState<string>('all');
   const [indexError, setIndexError] = useState<string | null>(null);
+
+  // The free AI tier can be busy (the primary model often answers with 503
+  // "high demand" and the app fails over to a fallback model). After 15s of
+  // waiting we say so instead of spinning silently.
+  const [askElapsed, setAskElapsed] = useState(0);
+  useEffect(() => {
+    if (!isAsking) {
+      setAskElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = setInterval(
+      () => setAskElapsed(Math.floor((Date.now() - startedAt) / 1000)),
+      1000
+    );
+    return () => clearInterval(timer);
+  }, [isAsking]);
 
   const displayName = user?.fullName || 'Muhammad Sohaib';
   const initials = displayName
@@ -314,7 +331,11 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                   {isAsking && (
                     <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-300 shadow-xs">
                       <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                      <span>Searching your notes and generating answer...</span>
+                      <span>
+                        {askElapsed >= 15
+                          ? `Still working (${askElapsed}s) — the free AI tier can be busy, but this always finishes: an answer in about a minute, or a direct extract from your notes if the AI stays unavailable.`
+                          : 'Searching your notes and generating answer...'}
+                      </span>
                     </div>
                   )}
                 </div>

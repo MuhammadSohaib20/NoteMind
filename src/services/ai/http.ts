@@ -5,6 +5,28 @@ export function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Bounds an async operation with a hard deadline. The wrapped promise keeps
+ * running after the deadline fires (its settlement is ignored from then on),
+ * which is fine for provider calls that are either answered or aborted by
+ * their own per-attempt timeouts.
+ */
+export function withDeadline<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
+/**
  * Serialises requests so the provider is never hit faster than the configured
  * requests-per-minute budget. Free tiers are aggressive about this and return
  * 429 rather than queueing.

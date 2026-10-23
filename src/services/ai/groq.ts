@@ -55,7 +55,9 @@ export class GroqGenerationProvider implements GenerationProvider {
           },
           body: JSON.stringify(body),
           // fetch() waits forever without one; never leave a request unbounded.
-          signal: AbortSignal.timeout(aiConfig.timeoutMs),
+          // Generation gets the longer per-attempt budget (free-tier answers
+          // can legitimately take a minute).
+          signal: AbortSignal.timeout(aiConfig.genTimeoutMs),
         });
 
         if (!httpResponse.ok) {

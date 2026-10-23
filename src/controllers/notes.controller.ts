@@ -131,7 +131,9 @@ export async function extractTextFromFile(file: Express.Multer.File): Promise<st
     extractedText = `(No extractable text content found in uploaded file "${file.originalname}")`;
   }
 
-  return extractedText;
+  // PostgreSQL text columns reject NUL (0x00). Binary files read as UTF-8 can
+  // contain them and would otherwise fail the insert with a 500.
+  return extractedText.replace(new RegExp(String.fromCharCode(0), 'g'), '');
 }
 
 /**

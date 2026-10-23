@@ -8,6 +8,7 @@ import {
   getGenerationProvider,
   vectorToSql,
 } from '../services/ai';
+import { withDeadline } from '../services/ai/http';
 import { aiConfig } from '../config/ai';
 
 export const askRagSchema = z.object({
@@ -347,12 +348,19 @@ export async function askNotes(
         degraded = true;
       } else {
         try {
-          answer = await generationProvider.generate({
-            systemInstruction: SYSTEM_INSTRUCTION,
-            prompt: `Context:\n\n${buildContext(contextChunks)}\n\nQuestion: ${question}`,
-            temperature: 0.2,
-            maxOutputTokens: 4096,
-          });
+          // Hard deadline: past it the extractive fallback below answers from
+          // the retrieved chunks, so the chat never spins forever even when
+          // every provider is slow or overloaded.
+          answer = await withDeadline(
+            generationProvider.generate({
+              systemInstruction: SYSTEM_INSTRUCTION,
+              prompt: `Context:\n\n${buildContext(contextChunks)}\n\nQuestion: ${question}`,
+              temperature: 0.2,
+              maxOutputTokens: 4096,
+            }),
+            aiConfig.genDeadlineMs,
+            'generation'
+          );
         } catch (error) {
           console.error('[rag] generation failed, using extractive fallback:', (error as Error).message);
           answer = buildExtractiveAnswer(contextChunks);
