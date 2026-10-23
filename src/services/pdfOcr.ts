@@ -173,49 +173,89 @@ export async function ocrScannedPdfBuffer(buffer: Buffer): Promise<string> {
   }
 
   const maxPages = Math.max(1, aiConfig.pdfOcrMaxPages);
-  const pageImages: Buffer[] = [];
+  const deadlineMs = Math.max(30_000, aiConfig.pdfOcrDeadlineMs);
+  const startedAt = Date.now();
 
+  let doc: any;
   try {
-    const doc = await pdfToImg.pdf(buffer, { scale: OCR_SCALE, format: 'png' });
-    try {
-      for await (const page of doc) {
-        if (pageImages.length >= maxPages) break;
-        pageImages.push(Buffer.from(page));
-      }
-    } finally {
-      try {
-        await doc.destroy();
-      } catch {
-        /* ignore */
-      }
-    }
+    // JPEG rasterisation is several times faster than PNG for large pages and
+    // keeps peak memory far lower.
+    doc = await pdfToImg.pdf(buffer, { scale: OCR_SCALE, format: 'jpg' });
   } catch (err) {
     console.error('[ocr] PDF page rendering failed:', (err as Error).message);
     return '';
   }
-
-  if (pageImages.length === 0) return '';
 
   let worker: Worker;
   try {
     worker = await getWorker();
   } catch (err) {
     console.error('[ocr] tesseract worker failed to start:', (err as Error).message);
+    try {
+      await doc.destroy();
+    } catch {
+      /* ignore */
+    }
     return '';
   }
 
+  // Pages are processed ONE AT A TIME (render -> downscale -> recognise ->
+  // discard). Buffering every rasterised page first held hundreds of MB for a
+  // large scan, and feeding full-resolution pages (tens of megapixels for
+  // scanner-exported page boxes) to Tesseract made a single upload burn CPU
+  // for 15+ minutes. The deadline guarantees the request always finishes:
+  // whatever was recognised so far is kept as partial text.
   const parts: string[] = [];
-  for (const [index, image] of pageImages.entries()) {
-    try {
-      const result = await worker.recognize(image);
-      const text = (result.data && result.data.text ? result.data.text : '').trim();
-      if (text.replace(/\s+/g, '').length > 0) {
-        parts.push(text);
+  let pageIndex = 0;
+  let previousPageAt = Date.now();
+  try {
+    for await (const page of doc) {
+      if (pageIndex >= maxPages) break;
+      if (Date.now() - startedAt > deadlineMs) {
+        console.warn(
+          `[ocr] deadline ${deadlineMs}ms reached after page ${pageIndex}; keeping partial text`
+        );
+        break;
       }
-    } catch (err) {
-      console.error(`[ocr] page ${index + 1} recognition failed:`, (err as Error).message);
+      const renderMs = Date.now() - previousPageAt;
+      pageIndex += 1;
+
+      let image: Buffer;
+      try {
+        image = await maybeDownscale(Buffer.from(page));
+      } catch (err) {
+        console.error(`[ocr] page ${pageIndex} downscale failed:`, (err as Error).message);
+        previousPageAt = Date.now();
+        continue;
+      }
+
+      const recogniseStart = Date.now();
+      try {
+        const result = await worker.recognize(image);
+        const text = (result.data && result.data.text ? result.data.text : '').trim();
+        if (text.replace(/\s+/g, '').length > 0) {
+          parts.push(text);
+        }
+      } catch (err) {
+        console.error(`[ocr] page ${pageIndex} recognition failed:`, (err as Error).message);
+      }
+      console.log(
+        `[ocr] page ${pageIndex}/${maxPages}: rendered ${renderMs}ms, recognised ${Date.now() - recogniseStart}ms`
+      );
+      previousPageAt = Date.now();
+    }
+  } catch (err) {
+    console.error('[ocr] PDF page rendering failed:', (err as Error).message);
+  } finally {
+    try {
+      await doc.destroy();
+    } catch {
+      /* ignore */
     }
   }
 
+  console.log(
+    `[ocr] finished: ${pageIndex} pages rendered, ${parts.length} with text, ${Date.now() - startedAt}ms total`
+  );
   return parts.join('\n\n').trim();
 }

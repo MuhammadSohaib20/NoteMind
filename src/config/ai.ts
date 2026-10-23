@@ -93,6 +93,20 @@ export const aiConfig = {
    * lecture-note documents.
    */
   pdfOcrMaxPages: int('PDF_OCR_MAX_PAGES', 20),
+
+  /**
+   * Bound for pdf-parse's text-layer extraction (ms). Normal files are fast
+   * (a 300-page, 30MB PDF takes ~7s), but a malformed one can stall the
+   * single-threaded server; on timeout the PDF falls through to the OCR path.
+   */
+  pdfParseTimeoutMs: int('PDF_PARSE_TIMEOUT_MS', 60000),
+
+  /**
+   * Total budget (ms) for OCR-ing one scanned PDF. Past this, the pages
+   * recognised so far are kept as partial text, so an upload always finishes
+   * instead of burning CPU indefinitely.
+   */
+  pdfOcrDeadlineMs: int('PDF_OCR_DEADLINE_MS', 240000),
 } as const;
 
 /** True when an embedding provider can be constructed. */

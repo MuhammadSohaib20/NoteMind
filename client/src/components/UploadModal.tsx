@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Upload, FileText, X, AlertCircle, CheckCircle2, Tag as TagIcon } from 'lucide-react';
 import { Collection } from '../types';
 
@@ -23,7 +23,23 @@ export const UploadModal: React.FC<UploadModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Large scans are OCR'd page by page on the server; tick a timer while the
+  // import runs so it never looks stuck. Hook must sit above the early return.
+  useEffect(() => {
+    if (!loading) {
+      setElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = setInterval(
+      () => setElapsed(Math.floor((Date.now() - startedAt) / 1000)),
+      1000
+    );
+    return () => clearInterval(timer);
+  }, [loading]);
 
   if (!isOpen) return null;
 
@@ -201,7 +217,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               className="px-5 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition shadow-md shadow-blue-600/20 disabled:opacity-50 flex items-center gap-2"
             >
               {loading ? (
-                <span>Importing File...</span>
+                <span>Importing… {elapsed}s</span>
               ) : (
                 <>
                   <Upload className="w-3.5 h-3.5" />
@@ -210,6 +226,13 @@ export const UploadModal: React.FC<UploadModalProps> = ({
               )}
             </button>
           </div>
+
+          {loading && elapsed >= 15 && (
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 -mt-1">
+              Reading &amp; indexing the file — large scanned PDFs are OCR'd
+              page by page and can take a couple of minutes. Keep this window open.
+            </p>
+          )}
         </form>
       </div>
     </div>

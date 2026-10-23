@@ -5,6 +5,8 @@ import { getDatabase } from '../db';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { MAX_NOTE_FILE_SIZE_BYTES } from '../constants/noteFiles';
 import { getEmbeddingProvider, chunkText, hashContent } from '../services/ai';
+import { withDeadline } from '../services/ai/http';
+import { aiConfig } from '../config/ai';
 import { replaceNoteEmbeddings, noteEmbeddingsAreCurrent } from '../services/ai/store';
 import { ocrScannedPdfBuffer, ocrImageBuffer } from '../services/pdfOcr';
 
@@ -72,6 +74,7 @@ async function performOcrOnBuffer(buffer: Buffer): Promise<string> {
 }
 
 export async function extractTextFromFile(file: Express.Multer.File): Promise<string> {
+  const startedAt = Date.now();
   const fileExt = file.originalname.split('.').pop()?.toLowerCase() || '';
   const mime = file.mimetype || '';
 
@@ -87,10 +90,17 @@ export async function extractTextFromFile(file: Express.Multer.File): Promise<st
     }
   } else if (fileExt === 'pdf') {
     try {
-      const pdfData = await pdfParse(file.buffer);
+      // Bound the text-layer pass: a normal PDF finishes in seconds, but a
+      // malformed/huge one could stall the single-threaded server. On timeout
+      // we fall through to the (page-capped, deadline-bounded) OCR path.
+      const pdfData: any = await withDeadline(
+        pdfParse(file.buffer),
+        aiConfig.pdfParseTimeoutMs,
+        'pdf-parse'
+      );
       extractedText = pdfData && pdfData.text ? pdfData.text.trim() : '';
     } catch (err) {
-      console.error('PDF parsing error:', err);
+      console.warn('PDF text-layer parse failed or timed out:', (err as Error).message);
       extractedText = '';
     }
 
@@ -130,6 +140,11 @@ export async function extractTextFromFile(file: Express.Multer.File): Promise<st
   if (!extractedText || extractedText.trim().length === 0) {
     extractedText = `(No extractable text content found in uploaded file "${file.originalname}")`;
   }
+
+  console.log(
+    `[extract] "${file.originalname}" (${(file.buffer.length / 1048576).toFixed(1)}MB, ${fileExt}): ` +
+      `${extractedText.length} chars in ${Date.now() - startedAt}ms`
+  );
 
   // PostgreSQL text columns reject NUL (0x00). Binary files read as UTF-8 can
   // contain them and would otherwise fail the insert with a 500.

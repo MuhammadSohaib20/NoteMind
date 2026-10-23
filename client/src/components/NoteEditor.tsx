@@ -56,8 +56,24 @@ export const NoteEditor: React.FC<NoteEditorProps> = ({
   const [tagsList, setTagsList] = useState<string[]>([]);
   const [selectedBrowserFile, setSelectedBrowserFile] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [fileStatus, setFileStatus] = useState<string | null>(null);
+
+  // The upload+extract step can legitimately run for a couple of minutes on a
+  // large scanned PDF; tick a timer while saving so the button shows progress.
+  useEffect(() => {
+    if (!saving) {
+      setElapsed(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = setInterval(
+      () => setElapsed(Math.floor((Date.now() - startedAt) / 1000)),
+      1000
+    );
+    return () => clearInterval(timer);
+  }, [saving]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -592,7 +608,7 @@ export const NoteEditor: React.FC<NoteEditorProps> = ({
                 disabled={saving}
                 className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white text-xs font-semibold shadow-md shadow-blue-600/20 transition disabled:opacity-50"
               >
-                {saving ? 'Saving Note...' : 'Save Note'}
+                {saving ? `Saving Note… ${elapsed}s` : 'Save Note'}
               </button>
             </div>
           </form>
