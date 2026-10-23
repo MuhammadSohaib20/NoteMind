@@ -2,7 +2,14 @@ import { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'notemind_super_secret_jwt_key_2026';
+// Fail fast when the secret is missing: signing tokens with a publicly known
+// default (the old fallback) would let anyone forge sessions.
+const JWT_SECRET = process.env.JWT_SECRET ?? '';
+if (!JWT_SECRET) {
+  throw new Error(
+    'JWT_SECRET is not set. Copy .env.example to .env and set JWT_SECRET to a long random string.'
+  );
+}
 
 export function authenticate(
   req: AuthenticatedRequest,

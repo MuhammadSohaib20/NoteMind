@@ -8,10 +8,10 @@ This directory contains production-ready SQL scripts to set up the **NoteMind** 
 
 | File | Description |
 | --- | --- |
-| 📄 [`supabase/schema.sql`](file:///c:/Users/Hanzalah/.gemini/antigravity/scratch/notemind-db/supabase/schema.sql) | **Primary Schema Setup** (Standalone DB / Node API integration). Includes `pgvector`, tables, HNSW indexes, triggers, RLS, and RPC functions. |
-| 📄 [`supabase/schema_supabase_auth.sql`](file:///c:/Users/Hanzalah/.gemini/antigravity/scratch/notemind-db/supabase/schema_supabase_auth.sql) | **Supabase Auth Integrated Schema**. Links user profiles to `auth.users` with `auth.uid()` security policies & auto-sync trigger. |
-| 📄 [`supabase/seed.sql`](file:///c:/Users/Hanzalah/.gemini/antigravity/scratch/notemind-db/supabase/seed.sql) | **Test Seed Data**. Populates initial users, collections, notes, tags, and 768-dim embeddings. |
-| 📄 [`supabase/functions.sql`](file:///c:/Users/Hanzalah/.gemini/antigravity/scratch/notemind-db/supabase/functions.sql) | **Stored Functions & RAG Utilities**. Contains `match_notes`, statistics, and tag cleanup routines. |
+| 📄 [`supabase/schema.sql`](schema.sql) | **Primary Schema Setup** (Standalone DB / Node API integration). Includes `pgvector`, tables, HNSW indexes, triggers, RLS, and RPC functions. |
+| 📄 [`supabase/schema_supabase_auth.sql`](schema_supabase_auth.sql) | **Supabase Auth Integrated Schema**. Links user profiles to `auth.users` with `auth.uid()` security policies & auto-sync trigger. |
+| 📄 [`supabase/seed.sql`](seed.sql) | **Test Seed Data**. Populates initial users, collections, notes, tags, and 768-dim embeddings. |
+| 📄 [`supabase/functions.sql`](functions.sql) | **Stored Functions & RAG Utilities**. Contains `match_notes`, statistics, and tag cleanup routines. |
 
 ---
 
@@ -22,9 +22,9 @@ This directory contains production-ready SQL scripts to set up the **NoteMind** 
 1. Open your project on [Supabase Dashboard](https://supabase.com/dashboard).
 2. Go to the **SQL Editor** tab from the left sidebar.
 3. Click **New Query**.
-4. Copy the entire contents of [`supabase/schema.sql`](file:///c:/Users/Hanzalah/.gemini/antigravity/scratch/notemind-db/supabase/schema.sql) (or [`supabase/schema_supabase_auth.sql`](file:///c:/Users/Hanzalah/.gemini/antigravity/scratch/notemind-db/supabase/schema_supabase_auth.sql) if using Supabase Auth).
+4. Copy the entire contents of [`supabase/schema.sql`](schema.sql) (or [`supabase/schema_supabase_auth.sql`](schema_supabase_auth.sql) if using Supabase Auth).
 5. Click **Run**.
-6. (Optional) Run [`supabase/seed.sql`](file:///c:/Users/Hanzalah/.gemini/antigravity/scratch/notemind-db/supabase/seed.sql) to add initial sample data.
+6. (Optional) Run [`supabase/seed.sql`](seed.sql) to add initial sample data.
 
 ---
 

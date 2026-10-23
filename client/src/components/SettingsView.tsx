@@ -181,7 +181,7 @@ export const SettingsView: React.FC = () => {
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="sohaib.zaheer1987@gmail.com"
+                    placeholder="you@example.com"
                     className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-2.5 text-xs sm:text-sm text-slate-800 dark:text-slate-100 focus:outline-none focus:border-blue-600 transition"
                   />
                 </div>
