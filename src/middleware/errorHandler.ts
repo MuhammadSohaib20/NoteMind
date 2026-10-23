@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { ZodError } from 'zod';
 import { ApiResponse } from '../types';
+import { MAX_NOTE_FILE_SIZE_MB } from '../constants/noteFiles';
 
 export function errorHandler(
   err: any,
@@ -16,6 +17,15 @@ export function errorHandler(
       error: {
         message: 'Validation error',
         details: err.errors,
+      },
+    });
+  }
+
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({
+      success: false,
+      error: {
+        message: `File exceeds the ${MAX_NOTE_FILE_SIZE_MB} MB upload limit`,
       },
     });
   }
