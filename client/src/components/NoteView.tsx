@@ -3,6 +3,7 @@ import { Note, Tag } from '../types';
 import { apiFetchBlob } from '../api/client';
 import {
   ArrowLeft,
+  Loader2,
   Edit3,
   Trash2,
   Share2,
@@ -371,6 +372,17 @@ export const NoteView: React.FC<NoteViewProps> = ({
         <div
           className={`rounded-2xl border shadow-xs p-6 sm:p-10 transition-colors duration-200 ${themeContainerClasses}`}
         >
+          {/* Background extraction still running for this import */}
+          {note.extractionPending && (
+            <div className="mb-5 inline-flex items-center gap-2.5 px-4 py-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 text-xs font-semibold text-amber-700 dark:text-amber-300">
+              <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+              <span>
+                Extracting text in the background — large scanned PDFs can take
+                a minute. This view refreshes automatically.
+              </span>
+            </div>
+          )}
+
           {/* Top Navigation & Action Bar */}
           <div
             className={`flex flex-wrap items-center justify-between gap-3 pb-5 border-b ${

@@ -205,6 +205,38 @@ describe('Express REST API Integration Tests', () => {
     expect(removed.status).toBe(200);
   });
 
+  it('8c. imports respond instantly and extract text in the background', async () => {
+    const uploaded = await request(app)
+      .post('/api/v1/notes/upload')
+      .set('Authorization', 'Bearer ' + authToken)
+      .attach('file', Buffer.from('Background extraction keeps imports fast.\n'), {
+        filename: 'fast-import.txt',
+        contentType: 'text/plain',
+      });
+
+    // The response must not wait for extraction: it returns the processing
+    // placeholder and flags the note as still extracting.
+    expect(uploaded.status).toBe(201);
+    expect(uploaded.body.data.extractionPending).toBe(true);
+    expect(uploaded.body.data.content).toContain('[Processing:');
+
+    // The background task writes the real text in; the flag flips when done.
+    const noteId = uploaded.body.data.id;
+    let pending = true;
+    let content = '';
+    for (let attempt = 0; attempt < 25 && pending; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const check = await request(app)
+        .get(`/api/v1/notes/${noteId}`)
+        .set('Authorization', 'Bearer ' + authToken);
+      pending = check.body.data.extractionPending === true;
+      content = check.body.data.content;
+    }
+
+    expect(pending).toBe(false);
+    expect(content).toContain('Background extraction keeps imports fast.');
+  });
+
   it('9. GET /api/v1/notes/:id should return created note', async () => {
     const res = await request(app)
       .get(`/api/v1/notes/${createdNoteId}`)

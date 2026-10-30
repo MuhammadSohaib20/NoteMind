@@ -69,6 +69,11 @@ export interface Note {
   file_preview?: string;
   /** True when the note's embeddings are current for the active AI model. */
   indexed?: boolean;
+  /**
+   * True while an imported file's text extraction (PDF parse / OCR) is still
+   * running in the background. The list query polls until it flips to false.
+   */
+  extractionPending?: boolean;
 }
 
 /** Per-note result of POST /notes/index. */

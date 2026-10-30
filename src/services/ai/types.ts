@@ -34,10 +34,29 @@ export interface GenerationRequest {
   json?: boolean;
 }
 
+/**
+ * One event of a streamed answer.
+ *
+ * - `delta`: the next piece of the answer; the client appends it to the
+ *   transcript, so the UI shows the answer typing itself.
+ * - `restart`: the provider died mid-answer; the client must discard the
+ *   partial text — the next delta starts a fresh answer from the fallback
+ *   model in the chain.
+ */
+export type StreamEvent =
+  | { type: 'delta'; text: string }
+  | { type: 'restart'; reason: string };
+
 export interface GenerationProvider {
   readonly name: string;
   readonly model: string;
   generate(request: GenerationRequest): Promise<string>;
+  /**
+   * Stream the answer as it is generated. Providers with native streaming
+   * implement it; the resilient chain wraps `generate()` for the rest, so
+   * this is optional by design.
+   */
+  generateStream?(request: GenerationRequest): AsyncGenerator<StreamEvent>;
 }
 
 export class AiProviderError extends Error {

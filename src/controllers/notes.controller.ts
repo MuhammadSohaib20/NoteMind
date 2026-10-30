@@ -165,8 +165,10 @@ export function isPlaceholderContent(content: string | null | undefined): boolea
   //   [Uploaded PDF document: "x.pdf"]
   //   [Uploaded Scanned Image: "x.jpg"]
   //   [Uploaded File: "x.docx"]
+  //   [Processing: "x.pdf" — text extraction in progress]   (background import)
   return (
     /^\[Uploaded [^"\]]+: "[^"]+"\]$/.test(trimmed) ||
+    trimmed.startsWith('[Processing:') ||
     trimmed.startsWith('(No extractable text content found')
   );
 }
@@ -283,6 +285,7 @@ export async function listNotes(
       SELECT n.id, n.user_id as "userId", n.collection_id as "collectionId",
              n.title, n.content, n.file_name as "fileName", n.file_type as "fileType",
              n.file_preview as "filePreview",
+             (n.content LIKE '[Processing: %') as "extractionPending",
              n.created_at as "createdAt", n.updated_at as "updatedAt",
              c.name as "collectionName",
              COALESCE(string_agg(DISTINCT t.name, ','), '') as "tagNames"
@@ -421,6 +424,7 @@ export async function getNoteById(
       `SELECT n.id, n.user_id as "userId", n.collection_id as "collectionId",
               n.title, n.content, n.file_name as "fileName", n.file_type as "fileType", n.file_data as "fileData",
               n.file_preview as "filePreview",
+              (n.content LIKE '[Processing: %') as "extractionPending",
               n.created_at as "createdAt", n.updated_at as "updatedAt",
               c.name as "collectionName",
               COALESCE(string_agg(DISTINCT t.name, ','), '') as "tagNames"
@@ -550,11 +554,13 @@ export async function createNote(
 
     await db.query('COMMIT;');
 
-    // Indexing for AI search is now explicit: the user picks which notes the
-    // assistant may see via POST /notes/index. This keeps API usage (and the
-    // free-tier budget) fully under the user's control.
+    // Embeddings are built in the background right away (scheduleAutoIndex),
+    // so the note becomes searchable with no manual indexing step. This
+    // response is sent before the embed lands, hence the false flag; the next
+    // list fetch picks up the refreshed value.
     note.indexed = false;
     note.tags = cleanTags;
+    scheduleAutoIndex(db, userId, [note.id], `create note ${note.id}`);
 
     return res.status(201).json({
       success: true,
@@ -564,6 +570,66 @@ export async function createNote(
     await db.query('ROLLBACK;').catch(() => {});
     next(error);
   }
+}
+
+/**
+ * Runs text extraction (and the DOCX preview conversion) AFTER the upload
+ * response has been sent, then writes the result into the note.
+ *
+ * A large scanned PDF can take a minute of OCR; doing that inline made every
+ * import feel frozen. Instead the note is created instantly with a
+ * `[Processing: ...]` placeholder and filled in here. The UPDATE only touches
+ * notes whose content is still the placeholder, so an edit the user makes
+ * while extraction runs is never clobbered.
+ */
+function scheduleBackgroundExtraction(
+  db: any,
+  noteId: string,
+  userId: string,
+  file: Express.Multer.File,
+  fileExt: string
+): void {
+  void (async () => {
+    const startedAt = Date.now();
+    let text = '';
+    try {
+      text = await extractTextFromFile(file);
+    } catch (err) {
+      console.error('[extract] background extraction failed:', (err as Error).message);
+      text = `[Uploaded File: "${file.originalname}"]`;
+    }
+
+    let preview: string | null = null;
+    if (fileExt === 'docx') {
+      try {
+        preview = (await mammoth.convertToHtml({ buffer: file.buffer })).value;
+      } catch (error) {
+        console.error('[extract] background preview conversion failed:', (error as Error).message);
+      }
+    }
+
+    try {
+      await db.query(
+        `UPDATE "notes"
+            SET content = $1,
+                file_preview = COALESCE($2, file_preview),
+                updated_at = NOW()
+          WHERE id = $3 AND user_id = $4 AND content LIKE '[Processing: %';`,
+        [text, preview, noteId, userId]
+      );
+      console.log(
+        `[extract] background extraction finished for note ${noteId} ` +
+          `(${(file.buffer.length / 1048576).toFixed(1)}MB, ${fileExt || 'txt'}) ` +
+          `in ${Date.now() - startedAt}ms -> ${text.length} chars`
+      );
+
+      // The real text just landed: embed it in the background too, so the
+      // import is ready for the assistant with no manual indexing step.
+      scheduleAutoIndex(db, userId, [noteId], `import ${file.originalname}`);
+    } catch (err) {
+      console.error('[extract] failed to store background extraction result:', (err as Error).message);
+    }
+  })();
 }
 
 export async function uploadNoteFile(
@@ -589,22 +655,9 @@ export async function uploadNoteFile(
     const fileExt = file.originalname.split('.').pop()?.toLowerCase() || '';
     const noteTitle = file.originalname.replace(/\.[^/.]+$/, '');
 
-    let extractedText = '';
-    try {
-      extractedText = await extractTextFromFile(file);
-    } catch (err: any) {
-      console.error('File text extraction error:', err);
-      extractedText = `[Uploaded File: "${file.originalname}"]`;
-    }
-    let filePreview: string | null = null;
-    if (fileExt === 'docx') {
-      try {
-        const converted = await mammoth.convertToHtml({ buffer: file.buffer });
-        filePreview = converted.value;
-      } catch (error) {
-        console.error('Document preview conversion error:', error);
-      }
-    }
+    // The note is saved IMMEDIATELY with this placeholder; the heavy
+    // extraction runs in the background (see scheduleBackgroundExtraction).
+    const placeholder = `[Processing: "${file.originalname}" — text extraction in progress]`;
 
     if (fileExt && !tagsList.some((t) => t.toLowerCase() === fileExt.toLowerCase())) {
       tagsList.push(fileExt);
@@ -628,7 +681,7 @@ export async function uploadNoteFile(
        RETURNING id, user_id as "userId", collection_id as "collectionId", title, content,
                  file_name as "fileName", file_type as "fileType", file_preview as "filePreview",
                  created_at as "createdAt", updated_at as "updatedAt";`,
-      [userId, collectionId || null, noteTitle, extractedText, file.originalname, fileMime, fileDataUrl, filePreview]
+      [userId, collectionId || null, noteTitle, placeholder, file.originalname, fileMime, fileDataUrl, null]
     );
 
     const note = result.rows[0] as any;
@@ -660,6 +713,10 @@ export async function uploadNoteFile(
     // Indexing for AI is explicit now; see createNote.
     note.indexed = false;
     note.tags = tagsList;
+    note.extractionPending = true;
+
+    // Extraction runs from here on; the response does not wait for it.
+    scheduleBackgroundExtraction(db, note.id, userId, file, fileExt);
 
     return res.status(201).json({
       success: true,
@@ -755,13 +812,16 @@ export async function updateNote(
     await db.query('COMMIT;');
 
     // Editing content, title or tags invalidates the stored AI snapshot:
-    // embeddings are derived from exactly those fields. Drop them so the
-    // assistant only ever sees what the user explicitly (re-)indexed.
+    // embeddings are derived from exactly those fields. Drop them, then
+    // re-embed in the background so the note stays searchable without any
+    // manual re-indexing step.
     const affectsEmbedding = content !== undefined || title !== undefined || tags !== undefined;
     if (affectsEmbedding) {
       await db.query(`DELETE FROM "note_embeddings" WHERE note_id = $1;`, [id]);
-      // Embeddings were just dropped: the note is unindexed until re-indexed.
+      // Unindexed only until the background re-embed below lands (the next
+      // list fetch picks up the refreshed flag).
       note.indexed = false;
+      scheduleAutoIndex(db, userId, [id], `update note ${id}`);
     } else {
       const indexedIds = await getIndexedNoteIds(db, [note]);
       note.indexed = indexedIds.has(note.id);
@@ -859,24 +919,31 @@ export async function permanentlyDeleteNote(
  * Only these notes get embeddings, so free-tier API usage stays fully under
  * the user's control and /rag/ask never touches unindexed notes.
  */
-export async function indexNotes(
-  req: AuthenticatedRequest,
-  res: Response<ApiResponse>,
-  next: NextFunction
-) {
+/**
+ * The indexing pipeline shared by the manual endpoint and the automatic
+ * background indexing that runs on create / update / import: ownership check,
+ * placeholder self-heal, the cheap hash-based up-to-date check, then embed.
+ * Throws when no embedding provider is configured.
+ */
+async function runIndexNotes(
+  db: any,
+  userId: string,
+  noteIds: string[],
+  force = false
+): Promise<{
+  results: Array<{
+    noteId: string;
+    title: string | null;
+    status: 'indexed' | 'up_to_date' | 'failed' | 'not_found' | 'trashed';
+    chunks?: number;
+    error?: string;
+  }>;
+  summary: { requested: number; indexed: number; upToDate: number; failed: number };
+}> {
   try {
-    const userId = req.user!.id;
-    const { noteIds, force = false } = req.body as { noteIds: string[]; force?: boolean };
-    const db = await getDatabase();
-
     const provider = getEmbeddingProvider();
     if (!provider) {
-      return res.status(503).json({
-        success: false,
-        error: {
-          message: 'AI indexing is not configured. Add GEMINI_API_KEY to .env and restart the server.',
-        },
-      });
+      throw new Error('AI indexing is not configured (GEMINI_API_KEY is not set)');
     }
 
     const owned = await db.query(
@@ -988,6 +1055,35 @@ export async function indexNotes(
       }
     }
 
+    return { results, summary };
+  } catch (error: any) {
+    // Log with context, then let the caller decide how to surface it (HTTP
+    // error for the manual endpoint, a warning line for background runs).
+    console.error(`[index] pipeline failed: ${(error as Error).message}`);
+    throw error;
+  }
+}
+
+export async function indexNotes(
+  req: AuthenticatedRequest,
+  res: Response<ApiResponse>,
+  next: NextFunction
+) {
+  try {
+    const userId = req.user!.id;
+    const { noteIds, force = false } = req.body as { noteIds: string[]; force?: boolean };
+    const db = await getDatabase();
+
+    if (!getEmbeddingProvider()) {
+      return res.status(503).json({
+        success: false,
+        error: {
+          message: 'AI indexing is not configured. Add GEMINI_API_KEY to .env and restart the server.',
+        },
+      });
+    }
+
+    const { results, summary } = await runIndexNotes(db, userId, noteIds, force);
     return res.status(200).json({
       success: true,
       data: { results, summary },
@@ -995,4 +1091,26 @@ export async function indexNotes(
   } catch (error: any) {
     next(error);
   }
+}
+
+/**
+ * Embeds notes in the background right after they are created, updated or
+ * imported, so the assistant can answer from them without any manual indexing
+ * step. Never throws: on failure the note simply stays unindexed (the manual
+ * endpoint still works as a fallback) and the reason is logged.
+ */
+function scheduleAutoIndex(db: any, userId: string, noteIds: string[], label: string): void {
+  void (async () => {
+    if (!getEmbeddingProvider()) return; // AI not configured - nothing to do
+    const startedAt = Date.now();
+    try {
+      const { summary } = await runIndexNotes(db, userId, noteIds);
+      console.log(
+        `[index] auto-index ${label} finished in ${Date.now() - startedAt}ms: ` +
+          `indexed=${summary.indexed} upToDate=${summary.upToDate} failed=${summary.failed}`
+      );
+    } catch (error) {
+      console.warn(`[index] auto-index ${label} failed: ${(error as Error).message}`);
+    }
+  })();
 }

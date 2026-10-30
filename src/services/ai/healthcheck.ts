@@ -1,5 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { aiConfig } from '../../config/ai';
+import { markGenerationModelUnusable } from './index';
+import { withDeadline } from './http';
 
 /**
  * Boot-time verification of the configured model ids.
@@ -48,17 +50,30 @@ export async function verifyAiConfiguration(): Promise<void> {
     if (!model) continue;
 
     try {
-      await client.models.generateContent({
-        model,
-        contents: '.',
-        config: { maxOutputTokens: 8 },
-      });
-      console.log(`[ai] generation  OK  ${model}`);
+      // Probe the STREAMING path — that is what /rag/ask/stream uses. A model
+      // can answer a plain generateContent yet stall on the stream open, which
+      // would cost every ask its full open-timeout. Read one chunk so failures
+      // that only surface on the first read are caught here too.
+      const stream = await withDeadline(
+        client.models.generateContentStream({
+          model,
+          contents: '.',
+          config: { maxOutputTokens: 8 },
+        }),
+        10_000,
+        `generation stream open for "${model}"`
+      );
+      for await (const _chunk of stream) break;
+      console.log(`[ai] generation  OK  ${model} (stream)`);
     } catch (error) {
+      // Record it so streaming skips this model instead of stalling the first
+      // token for the whole open-timeout. The chain still serves answers via
+      // the next model; a restart re-probes (e.g. after a daily quota reset).
+      markGenerationModelUnusable(model);
       console.warn(`[ai] generation model "${model}" is NOT usable: ${(error as Error).message}`);
       console.warn(
         `[ai]   -> If it was retired, change AI_GEN_MODEL (or AI_GEN_FALLBACK_MODEL) in .env. ` +
-          `Requests to it will otherwise fall back to the next model in the chain.`
+          `Streaming skips it for this run; other chain models keep serving.`
       );
     }
   }

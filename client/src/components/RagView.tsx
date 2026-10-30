@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain,
   Send,
@@ -45,6 +45,31 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
+  // Live streaming turn: the answer accumulates as SSE deltas arrive, so the
+  // card below shows the answer typing itself instead of a waiting spinner.
+  const [streaming, setStreaming] = useState<{
+    question: string;
+    answer: string;
+    sources: ChatTurn['sources'];
+    notice?: string;
+  } | null>(null);
+  const pendingAnswerRef = useRef('');
+  const flushTimerRef = useRef<number | null>(null);
+
+  // Deltas can arrive faster than Markdown is worth re-parsing; render at
+  // most ~8 times per second and always flush the final text on completion.
+  const flushStreamingAnswer = () => {
+    flushTimerRef.current = null;
+    const text = pendingAnswerRef.current;
+    setStreaming((prev) => (prev ? { ...prev, answer: text } : prev));
+  };
+  const scheduleStreamingAnswer = (text: string) => {
+    pendingAnswerRef.current = text;
+    if (flushTimerRef.current === null) {
+      flushTimerRef.current = window.setTimeout(flushStreamingAnswer, 120);
+    }
+  };
+
   // AI Index panel state. The selection is intentionally NOT persisted: every
   // visit starts fresh, so the assistant only ever analyses the notes the
   // user ticked for the current session.
@@ -70,6 +95,15 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     );
     return () => clearInterval(timer);
   }, [isAsking]);
+
+  // Never leave a pending Markdown flush behind on unmount.
+  useEffect(() => {
+    return () => {
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+      }
+    };
+  }, []);
 
   const displayName = user?.fullName || 'Muhammad Sohaib';
   const initials = displayName
@@ -167,9 +201,53 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     const trimmed = qText.trim();
     if (!trimmed) return;
     setQuestion('');
+    pendingAnswerRef.current = '';
+    setStreaming({ question: trimmed, answer: '', sources: [] });
 
     try {
-      const res = await askRag({ question: trimmed, topK: 4, noteIds: scopedNoteIds });
+      const res = await askRag({
+        question: trimmed,
+        topK: 4,
+        noteIds: scopedNoteIds,
+        onMeta: (meta) => {
+          // Matched notes + sources are known before generation starts, so
+          // they appear live while the answer is still streaming.
+          setStreaming((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  sources: (meta.sources ?? []).map((src) => ({
+                    id: src.noteId,
+                    title: src.title,
+                    content: src.chunkContent,
+                    collectionName: src.collectionName,
+                    similarity: src.similarity,
+                  })),
+                }
+              : prev
+          );
+        },
+        onDelta: scheduleStreamingAnswer,
+        onRestart: () => {
+          // A provider died mid-answer; the fallback model starts the
+          // answer over from the top.
+          pendingAnswerRef.current = '';
+          setStreaming((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  answer: '',
+                  notice: 'The AI got disconnected — retrying with a fallback model…',
+                }
+              : prev
+          );
+        },
+      });
+
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
       if (res) {
         setChatHistory((prev) => [
           ...prev,
@@ -180,8 +258,15 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
           },
         ]);
       }
+      setStreaming(null);
     } catch {
-      // handled by error state
+      // Hard failure (network dropped / stream died): drop the partial
+      // bubble; the error banner below the chat explains what happened.
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      setStreaming(null);
     }
   };
 
@@ -218,6 +303,37 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     'What are the key concepts in Operating System?',
     'Find information about my project ideas',
   ];
+
+  // "Matched Notes" grid, shared by the streaming card and the final card.
+  const renderSourceGrid = (sources: ChatTurn['sources']) => (
+    <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+      <span className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+        Matched Notes ({sources.length})
+      </span>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        {sources.map((src, sIdx) => (
+          <div
+            key={sIdx}
+            onClick={() => handleOpenSourceNote(src.id, src.title)}
+            className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/80 hover:bg-blue-50/60 dark:hover:bg-blue-950/60 border border-slate-200/80 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-500 cursor-pointer transition"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate flex items-center gap-1.5">
+                <FileText className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                {src.title}
+              </span>
+              <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
+                {src.similarity}%
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2 mt-1">
+              {src.content}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 
   return (
     <div className="flex-1 min-h-0 bg-[#F8FAFC] dark:bg-[#0F172A] flex flex-col h-full overflow-hidden transition-colors">
@@ -295,40 +411,55 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                         <MarkdownContent text={turn.answer} />
 
                         {/* Source Citations */}
-                        {turn.sources.length > 0 && (
-                          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
-                            <span className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
-                              Matched Notes ({turn.sources.length})
-                            </span>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                              {turn.sources.map((src, sIdx) => (
-                                <div
-                                  key={sIdx}
-                                  onClick={() => handleOpenSourceNote(src.id, src.title)}
-                                  className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/80 hover:bg-blue-50/60 dark:hover:bg-blue-950/60 border border-slate-200/80 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-500 cursor-pointer transition"
-                                >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate flex items-center gap-1.5">
-                                      <FileText className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-                                      {src.title}
-                                    </span>
-                                    <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
-                                      {src.similarity}%
-                                    </span>
-                                  </div>
-                                  <p className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2 mt-1">
-                                    {src.content}
-                                  </p>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                        {turn.sources.length > 0 && renderSourceGrid(turn.sources)}
                       </div>
                     </div>
                   ))}
 
-                  {isAsking && (
+                  {/* Live streaming turn — the answer types itself in. */}
+                  {streaming && (
+                    <div className="space-y-3">
+                      <div className="flex justify-end">
+                        <div className="bg-blue-600 text-white text-xs sm:text-sm font-medium px-4 py-2.5 rounded-2xl rounded-tr-xs max-w-md shadow-xs">
+                          {streaming.question}
+                        </div>
+                      </div>
+
+                      <div className="bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-2xl p-5 shadow-xs space-y-4">
+                        <div className="flex items-center gap-2 text-xs font-bold text-blue-600 dark:text-blue-400">
+                          <Brain className="w-4 h-4" />
+                          <span>NoteMind AI</span>
+                          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                            writing
+                          </span>
+                        </div>
+
+                        {streaming.notice && (
+                          <p className="text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg px-3 py-2">
+                            {streaming.notice}
+                          </p>
+                        )}
+
+                        {streaming.answer ? (
+                          <div>
+                            <MarkdownContent text={streaming.answer} />
+                            <span className="inline-block w-2 h-4 bg-blue-600/70 animate-pulse ml-0.5 align-middle" />
+                          </div>
+                        ) : (
+                          !streaming.notice && (
+                            <p className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">
+                              Searching your notes and starting the answer…
+                            </p>
+                          )
+                        )}
+
+                        {streaming.sources.length > 0 && renderSourceGrid(streaming.sources)}
+                      </div>
+                    </div>
+                  )}
+
+                  {isAsking && !streaming && (
                     <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-300 shadow-xs">
                       <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
                       <span>
