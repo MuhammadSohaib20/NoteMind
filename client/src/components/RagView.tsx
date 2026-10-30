@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useRag } from '../hooks/useRag';
 import { useNotes } from '../hooks/useNotes';
+import { useChatHistory, ChatTurn } from '../hooks/useChatHistory';
 import { useAuth } from '../context/AuthContext';
 import { Note, Collection } from '../types';
 import { MarkdownContent } from './MarkdownContent';
@@ -18,19 +19,6 @@ interface RagViewProps {
   notes: Note[];
   collections: Collection[];
   onSelectNote: (note: Note) => void;
-}
-
-interface ChatTurn {
-  question: string;
-  answer: string;
-  sources: {
-    id?: string;
-    title: string;
-    content: string;
-    collectionName?: string;
-    tags?: string[];
-    similarity: number;
-  }[];
 }
 
 /** POST /notes/index accepts at most 50 ids per request. */
@@ -42,7 +30,9 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   const { indexNotes } = useNotes();
 
   const [question, setQuestion] = useState('');
-  const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
+  // The conversation is kept in the react-query cache (see useChatHistory), so
+  // it survives navigation between pages and is only cleared on logout.
+  const { chatHistory, setChatHistory } = useChatHistory();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
   // Live streaming turn: the answer accumulates as SSE deltas arrive, so the
