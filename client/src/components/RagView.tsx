@@ -55,19 +55,60 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   } | null>(null);
   const pendingAnswerRef = useRef('');
   const flushTimerRef = useRef<number | null>(null);
+  // Paced reveal: how much of the streamed answer the user has seen so far,
+  // and the pace (characters/second) of that reveal. The models are fast
+  // enough to deliver an entire answer within a few hundred milliseconds,
+  // which would make it "pop in" all at once — pacing the reveal makes the
+  // answer read like live typing no matter how quickly the provider streams.
+  const revealedRef = useRef(0);
+  const REVEAL_CHARS_PER_SEC = 320;
+  const REVEAL_TICK_MS = 100;
+  const REVEAL_STEP_CHARS = Math.round((REVEAL_CHARS_PER_SEC * REVEAL_TICK_MS) / 1000);
 
-  // Deltas can arrive faster than Markdown is worth re-parsing; render at
-  // most ~8 times per second and always flush the final text on completion.
-  const flushStreamingAnswer = () => {
+  // Single self-scheduling timer: every REVEAL_TICK_MS advance the revealed
+  // slice by the amount the chosen pace implies, bounded by what has actually
+  // streamed in so far. It stops once the whole answer has been revealed.
+  const revealTick = () => {
     flushTimerRef.current = null;
-    const text = pendingAnswerRef.current;
-    setStreaming((prev) => (prev ? { ...prev, answer: text } : prev));
+    const full = pendingAnswerRef.current;
+    const revealed = Math.min(full.length, revealedRef.current + REVEAL_STEP_CHARS);
+    revealedRef.current = revealed;
+    const visible = full.slice(0, revealed);
+    setStreaming((prev) => (prev ? { ...prev, answer: visible } : prev));
+    if (revealed < full.length) {
+      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
+    }
   };
   const scheduleStreamingAnswer = (text: string) => {
     pendingAnswerRef.current = text;
     if (flushTimerRef.current === null) {
-      flushTimerRef.current = window.setTimeout(flushStreamingAnswer, 120);
+      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
     }
+  };
+  const stopReveal = () => {
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+  };
+  // The stream is done — but the reveal may still be catching up, because a
+  // fast model delivers the whole answer in a single burst. Keep the card up
+  // and resolve only once the full text has been revealed, so the caller
+  // never clears the answer mid-typing.
+  const finishReveal = (): Promise<void> => {
+    if (flushTimerRef.current === null && revealedRef.current < pendingAnswerRef.current.length) {
+      flushTimerRef.current = window.setTimeout(revealTick, 100);
+    }
+    return new Promise((resolve) => {
+      let tries = 0;
+      const check = () => {
+        // The tries cap guards against navigating away mid-reveal (the reveal
+        // timer dies with the view, so the promise must not wait forever).
+        if (revealedRef.current >= pendingAnswerRef.current.length || tries++ > 200) resolve();
+        else window.setTimeout(check, 80);
+      };
+      check();
+    });
   };
 
   // AI Index panel state. The selection is intentionally NOT persisted: every
@@ -202,6 +243,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     if (!trimmed) return;
     setQuestion('');
     pendingAnswerRef.current = '';
+    revealedRef.current = 0;
     setStreaming({ question: trimmed, answer: '', sources: [] });
 
     try {
@@ -232,6 +274,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
           // A provider died mid-answer; the fallback model starts the
           // answer over from the top.
           pendingAnswerRef.current = '';
+          revealedRef.current = 0;
           setStreaming((prev) =>
             prev
               ? {
@@ -244,11 +287,15 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
         },
       });
 
-      if (flushTimerRef.current !== null) {
-        clearTimeout(flushTimerRef.current);
-        flushTimerRef.current = null;
-      }
+      stopReveal();
       if (res) {
+        // Type out whatever is left before committing to history: a fast
+        // model delivers the whole answer in one burst, and the extractive
+        // fallback arrives with no deltas at all — so the reveal has to finish
+        // here or the card would clear mid-typing.
+        pendingAnswerRef.current = res.answer;
+        await finishReveal();
+        stopReveal();
         setChatHistory((prev) => [
           ...prev,
           {
@@ -262,10 +309,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     } catch {
       // Hard failure (network dropped / stream died): drop the partial
       // bubble; the error banner below the chat explains what happened.
-      if (flushTimerRef.current !== null) {
-        clearTimeout(flushTimerRef.current);
-        flushTimerRef.current = null;
-      }
+      stopReveal();
       setStreaming(null);
     }
   };
