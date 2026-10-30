@@ -35,6 +35,26 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   const { chatHistory, setChatHistory } = useChatHistory();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
+  // One-time build hint: only the current build (with live answer streaming)
+  // renders this chip, so seeing it confirms the tab is up to date — a tab
+  // running stale code shows no chip at all. Dismissed after the user's
+  // first completed answer in this tab (or by clicking it).
+  const [showStreamHint, setShowStreamHint] = useState(() => {
+    try {
+      return !sessionStorage.getItem('notemind_stream_hint_seen');
+    } catch {
+      return false;
+    }
+  });
+  const dismissStreamHint = () => {
+    try {
+      sessionStorage.setItem('notemind_stream_hint_seen', '1');
+    } catch {
+      /* private mode etc. — the hint simply returns next session */
+    }
+    setShowStreamHint(false);
+  };
+
   // Live streaming turn: the answer accumulates as SSE deltas arrive, so the
   // card below shows the answer typing itself instead of a waiting spinner.
   const [streaming, setStreaming] = useState<{
@@ -50,8 +70,10 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   // enough to deliver an entire answer within a few hundred milliseconds,
   // which would make it "pop in" all at once — pacing the reveal makes the
   // answer read like live typing no matter how quickly the provider streams.
+  // 180 chars/sec is deliberately readable: a typical answer types out over
+  // several seconds, like mainstream chat products.
   const revealedRef = useRef(0);
-  const REVEAL_CHARS_PER_SEC = 320;
+  const REVEAL_CHARS_PER_SEC = 180;
   const REVEAL_TICK_MS = 100;
   const REVEAL_STEP_CHARS = Math.round((REVEAL_CHARS_PER_SEC * REVEAL_TICK_MS) / 1000);
 
@@ -279,6 +301,9 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
 
       stopReveal();
       if (res) {
+        // The current build delivered and finished typing the answer — the
+        // build hint has served its purpose.
+        dismissStreamHint();
         // Type out whatever is left before committing to history: a fast
         // model delivers the whole answer in one burst, and the extractive
         // fallback arrives with no deltas at all — so the reveal has to finish
@@ -512,6 +537,21 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                 </div>
               )}
             </div>
+
+            {/* One-time build hint (current builds only): proves the tab runs
+                the streaming UI and disappears after the first answer. */}
+            {showStreamHint && (
+              <div className="px-4 pb-1 flex items-center justify-center">
+                <button
+                  type="button"
+                  onClick={dismissStreamHint}
+                  className="inline-flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full px-3 py-1 hover:text-slate-700 dark:hover:text-slate-200 transition"
+                >
+                  <Sparkles className="w-3 h-3 text-violet-500 dark:text-violet-400" />
+                  Answers stream in live — you'll see them type out
+                </button>
+              </div>
+            )}
 
             {/* Bottom Input Bar */}
             <form
