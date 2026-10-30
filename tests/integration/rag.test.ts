@@ -161,6 +161,28 @@ describe('RAG Pipeline Integration Tests', () => {
     expect(await waitForIndexed(kubernetesNoteId)).toBe(true);
   });
 
+  it('2b. should self-heal a leftover unindexed note on the next list load', async () => {
+    // Simulate a note that predates auto-indexing: drop its embeddings behind
+    // the app's back.
+    const db = await getDatabase();
+    await db.query('DELETE FROM "note_embeddings" WHERE note_id = $1;', [kubernetesNoteId]);
+
+    // Loading the notes list schedules the re-embed in the background; the
+    // flag flips once it lands — with no manual indexing step.
+    let healed = false;
+    for (let attempt = 0; attempt < 30 && !healed; attempt++) {
+      const list = await request(app)
+        .get('/api/v1/notes')
+        .set('Authorization', `Bearer ${authToken}`);
+      const note = (list.body.data as Array<{ id: string; indexed: boolean }>).find(
+        (n) => n.id === kubernetesNoteId
+      );
+      healed = note?.indexed === true;
+      if (!healed) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(healed).toBe(true);
+  });
+
   it('3. should create a second, unrelated note', async () => {
     const res = await request(app)
       .post('/api/v1/notes')

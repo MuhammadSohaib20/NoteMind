@@ -359,6 +359,14 @@ export async function listNotes(
       note.indexed = indexedIds.has(note.id);
     }
 
+    // Anything still unindexed (e.g. imported before auto-indexing existed)
+    // is embedded in the background right now — no manual indexing step.
+    scheduleSelfHealIndex(
+      db,
+      userId,
+      formattedData.filter((n: any) => !n.indexed)
+    );
+
     return res.status(200).json({
       success: true,
       data: formattedData,
@@ -1113,4 +1121,37 @@ function scheduleAutoIndex(db: any, userId: string, noteIds: string[], label: st
       console.warn(`[index] auto-index ${label} failed: ${(error as Error).message}`);
     }
   })();
+}
+
+/**
+ * Kicks off background indexing for notes that never got embeddings — imported
+ * before auto-indexing existed, or a note whose embed call failed earlier. The
+ * first notes-list load after a restart heals them with no manual step. Each
+ * note is scheduled at most once per process (a restart retries) so a
+ * persistently failing note cannot hammer the embedding API on every fetch.
+ */
+const selfHealScheduled = new Set<string>();
+
+function scheduleSelfHealIndex(
+  db: any,
+  userId: string,
+  notes: Array<{ id: string; content?: string | null }>
+): void {
+  if (!getEmbeddingProvider()) return; // AI not configured - nothing to heal
+
+  const candidates = notes
+    // A placeholder note has no real text to embed; it heals through
+    // extraction instead.
+    .filter((n) => !!n.content && !isPlaceholderContent(n.content))
+    .map((n) => n.id)
+    .filter((id) => !selfHealScheduled.has(id));
+  if (candidates.length === 0) return;
+
+  for (const id of candidates) selfHealScheduled.add(id);
+  scheduleAutoIndex(
+    db,
+    userId,
+    candidates,
+    `self-heal (${candidates.length} leftover note${candidates.length === 1 ? '' : 's'})`
+  );
 }
