@@ -117,6 +117,27 @@ function buildExtractiveAnswer(chunks: RetrievedChunk[]): string {
 }
 
 /**
+ * Sends a finished answer as a short series of `delta` frames so the caller
+ * only has to follow up with `done`.
+ *
+ * Used for the fallback answers — the extractive "here is what your notes
+ * say" reply, the keyword-mode reply, and the "not found" line — so that
+ * EVERY answer reaches the UI the same way (meta → delta* → done) and types
+ * itself out, instead of model answers streaming while fallback answers pop
+ * in whole. The pieces are the answer's own paragraphs, so concatenating the
+ * deltas reproduces the original text exactly.
+ */
+function streamAnswerInChunks(
+  answer: string,
+  send: (event: string, data: unknown) => void
+): void {
+  // Keep the blank-line separators so the joined deltas equal the answer.
+  for (const piece of answer.split(/(\n{2,})/)) {
+    if (piece.length > 0) send('delta', { text: piece });
+  }
+}
+
+/**
  * Legacy keyword-scored search, used only when no embedding provider is
  * configured. Keeps the endpoint working before an API key is added.
  */
@@ -450,6 +471,11 @@ function buildKeywordAnswer(retrievedNotes: RetrievedNote[]): string {
  *   restart { reason }                             — discard partial text
  *   done    { question, answer, retrievedNotes, sources, degraded }
  *
+ * Every answer follows the same meta → delta* → done shape: when the
+ * generation providers are busy or unavailable the extractive/keyword
+ * fallback is streamed as delta frames too, so the UI never pops a fallback
+ * answer in whole while a model answer types itself out.
+ *
  * The reliability guarantees of the one-shot endpoint are preserved: the
  * provider chain fails over (mid-answer failures emit `restart`), the whole
  * chain is capped by AI_GEN_DEADLINE_MS, and when no answer arrives at all
@@ -504,7 +530,9 @@ export async function askRagStream(
 
     if (retrieval.mode === 'keyword') {
       send('meta', { question, retrievedNotes: retrieval.retrievedNotes, sources: [] });
-      return finish(buildKeywordAnswer(retrieval.retrievedNotes), retrieval.retrievedNotes, [], true);
+      const answer = buildKeywordAnswer(retrieval.retrievedNotes);
+      streamAnswerInChunks(answer, send);
+      return finish(answer, retrieval.retrievedNotes, [], true);
     }
 
     const { contextChunks, retrievedNotes } = retrieval;
@@ -522,12 +550,16 @@ export async function askRagStream(
     send('meta', { question, retrievedNotes, sources });
 
     if (contextChunks.length === 0) {
-      return finish("I couldn't find that in your notes.", retrievedNotes, sources, false);
+      const answer = "I couldn't find that in your notes.";
+      streamAnswerInChunks(answer, send);
+      return finish(answer, retrievedNotes, sources, false);
     }
 
     const generationProvider = getGenerationProvider();
     if (!generationProvider) {
-      return finish(buildExtractiveAnswer(contextChunks), retrievedNotes, sources, true);
+      const answer = buildExtractiveAnswer(contextChunks);
+      streamAnswerInChunks(answer, send);
+      return finish(answer, retrievedNotes, sources, true);
     }
 
     let answer = '';
@@ -582,6 +614,7 @@ export async function askRagStream(
       // the retrieved chunks, so the chat never shows an empty bubble.
       answer = buildExtractiveAnswer(contextChunks);
       degraded = true;
+      streamAnswerInChunks(answer, send);
     }
 
     return finish(answer, retrievedNotes, sources, degraded);
@@ -590,9 +623,11 @@ export async function askRagStream(
     // frame instead of an HTTP error.
     console.error('[rag] streaming endpoint failed:', (error as Error).message);
     try {
+      const message = 'Something went wrong while generating the answer. Please try again.';
+      streamAnswerInChunks(message, send);
       send('done', {
         question,
-        answer: 'Something went wrong while generating the answer. Please try again.',
+        answer: message,
         retrievedNotes: [],
         sources: [],
         degraded: true,

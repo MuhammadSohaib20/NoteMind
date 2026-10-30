@@ -393,6 +393,61 @@ describe('RAG Pipeline Integration Tests', () => {
     expect(done.sources[0]).toHaveProperty('noteId');
   });
 
+  it('7e. should stream the extractive fallback as deltas too (no generation provider)', async () => {
+    // When the AI models are busy or unconfigured, the server answers from
+    // the retrieved chunks — that answer must arrive as delta frames exactly
+    // like a model answer, never as one whole `done` payload.
+    setGenerationProvider(null);
+
+    const res = await request(app)
+      .post('/api/v1/rag/ask/stream')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ question: 'How do I deploy with Kubernetes replicas?', topK: 3 });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    expect(res.text).toContain('event: meta');
+    expect(res.text).toContain('event: delta');
+
+    const deltaTexts = Array.from(
+      res.text.matchAll(/event: delta\ndata: ({"text".*})/g)
+    ).map((match) => JSON.parse(match[1]).text);
+    expect(deltaTexts.length).toBeGreaterThan(0);
+
+    const doneLine = res.text.match(/event: done\ndata: (.*)/);
+    expect(doneLine).toBeTruthy();
+    const done = JSON.parse(doneLine![1]);
+    // The deltas reconstruct the fallback answer exactly.
+    expect(deltaTexts.join('')).toBe(done.answer);
+    expect(done.degraded).toBe(true);
+    expect(done.retrievedNotes[0].title).toBe('Kubernetes Deployment Guide');
+  });
+
+  it('7f. should stream the keyword-mode answer as deltas too', async () => {
+    // Same guarantee on the keyword path (no embedding provider): the answer
+    // is still delivered as meta → delta* → done.
+    setEmbeddingProvider(null);
+
+    const res = await request(app)
+      .post('/api/v1/rag/ask/stream')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ question: 'Kubernetes', topK: 3 });
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('event: delta');
+
+    const deltaTexts = Array.from(
+      res.text.matchAll(/event: delta\ndata: ({"text".*})/g)
+    ).map((match) => JSON.parse(match[1]).text);
+    expect(deltaTexts.length).toBeGreaterThan(0);
+
+    const doneLine = res.text.match(/event: done\ndata: (.*)/);
+    expect(doneLine).toBeTruthy();
+    const done = JSON.parse(doneLine![1]);
+    expect(deltaTexts.join('')).toBe(done.answer);
+    expect(done.degraded).toBe(true);
+  });
+
   it('8. should degrade to keyword search when no embedding provider is configured', async () => {
     setEmbeddingProvider(null);
     setGenerationProvider(null);
