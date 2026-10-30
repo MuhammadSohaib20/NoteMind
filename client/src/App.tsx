@@ -52,6 +52,41 @@ const WorkspaceApp: React.FC = () => {
     setActiveView('dashboard');
   }, [user?.id]);
 
+  // Version guard: in dev the server is restarted to pick up backend changes,
+  // and an already-open tab would silently keep running older frontend code
+  // (e.g. the pre-streaming chat UI). Poll the server's boot stamp and reload
+  // once when it changes, so the page can never be paired with a server build
+  // it does not match. A restart mid-offline is recovered by the next poll.
+  React.useEffect(() => {
+    let lastStamp: string | null = null;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch('/health');
+        if (!res.ok) return;
+        const body = await res.json();
+        const stamp = body?.startedAt != null ? String(body.startedAt) : '';
+        if (!stamp) return;
+        if (lastStamp === null) {
+          lastStamp = stamp;
+          return;
+        }
+        if (stamp !== lastStamp && !cancelled) {
+          console.log('[notemind] server restarted — reloading to pick up the matching build');
+          window.location.reload();
+        }
+      } catch {
+        /* server briefly unreachable mid-restart; the next poll recovers */
+      }
+    };
+    poll();
+    const id = window.setInterval(poll, 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
   // Modals State
   const [isCollectionModalOpen, setIsCollectionModalOpen] = useState(false);
   const [collectionToEdit, setCollectionToEdit] = useState<Collection | null>(null);
