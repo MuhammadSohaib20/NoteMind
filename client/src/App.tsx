@@ -30,6 +30,10 @@ const queryClient = new QueryClient({
   },
 });
 
+// Build version — bump on every client build so stale tabs can be detected.
+// Shown in the footer so you can tell at a glance whether your tab is current.
+const BUILD_VERSION = '2';
+
 const WorkspaceApp: React.FC = () => {
   const { isAuthenticated, user } = useAuth();
 
@@ -80,7 +84,7 @@ const WorkspaceApp: React.FC = () => {
       }
     };
     poll();
-    const id = window.setInterval(poll, 30000);
+    const id = window.setInterval(poll, 5000);
     return () => {
       cancelled = true;
       window.clearInterval(id);
@@ -552,6 +556,12 @@ const WorkspaceApp: React.FC = () => {
           setActiveView('note-detail');
         }}
       />
+
+      {/* Build version badge — visible so you can tell at a glance whether this
+          tab is running the current code. Old tabs won't show this. */}
+      <div className="fixed bottom-1 right-1 text-[10px] text-slate-400 dark:text-slate-500 bg-white/80 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 rounded-full px-2.5 py-0.5 z-50">
+        build {BUILD_VERSION}
+      </div>
     </div>
   );
 };
