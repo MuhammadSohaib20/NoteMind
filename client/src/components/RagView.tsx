@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain,
   Send,
@@ -35,21 +35,68 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   const { chatHistory, setChatHistory } = useChatHistory();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
-  // Live streaming turn: each SSE delta updates the answer as it lands, so
-  // the user sees the answer type out instead of waiting for one whole
-  // response before anything renders.
+  // Live streaming turn: each SSE delta updates the answer as it lands. A
+  // paced reveal timer types the text out at a steady human-readable pace
+  // (~40 chars/sec) so the answer reads like live streaming no matter how
+  // fast the model actually delivers it.
   const [streaming, setStreaming] = useState<{
     question: string;
     answer: string;
     sources: ChatTurn['sources'];
     notice?: string;
   } | null>(null);
+  const pendingAnswerRef = useRef('');      // full text accumulated from deltas
+  const revealedRef = useRef(0);             // how many chars are visible now
+  const flushTimerRef = useRef<number | null>(null);
+
+  // ~40 chars/sec typing pace, ticking every 80ms.
+  const REVEAL_CHARS_PER_SEC = 40;
+  const REVEAL_TICK_MS = 80;
+  const REVEAL_STEP_CHARS = Math.max(1, Math.round((REVEAL_CHARS_PER_SEC * REVEAL_TICK_MS) / 1000));
+
+  const revealTick = () => {
+    flushTimerRef.current = null;
+    const full = pendingAnswerRef.current;
+    const revealed = Math.min(full.length, revealedRef.current + REVEAL_STEP_CHARS);
+    revealedRef.current = revealed;
+    const visible = full.slice(0, revealed);
+    setStreaming((prev) => (prev ? { ...prev, answer: visible } : prev));
+    if (revealed < full.length) {
+      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
+    }
+  };
 
   const scheduleStreamingAnswer = (text: string) => {
-    setStreaming((prev) =>
-      prev ? { ...prev, answer: text } : prev
-    );
+    pendingAnswerRef.current = text;
+    if (flushTimerRef.current === null) {
+      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
+    }
   };
+
+  const stopReveal = () => {
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+  };
+
+  // Wait for the reveal timer to finish showing everything before clearing
+  // the card, so the user always sees the complete answer.
+  const waitForRevealComplete = (): Promise<void> =>
+    new Promise((resolve) => {
+      const check = () => {
+        if (revealedRef.current >= pendingAnswerRef.current.length) resolve();
+        else window.setTimeout(check, 50);
+      };
+      check();
+    });
+
+  // Never leave a pending reveal timer behind on unmount.
+  useEffect(() => {
+    return () => {
+      stopReveal();
+    };
+  }, []);
 
   // AI Index panel state. The selection is intentionally NOT persisted: every
   // visit starts fresh, so the assistant only ever analyses the notes the
@@ -173,6 +220,9 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     const trimmed = qText.trim();
     if (!trimmed) return;
     setQuestion('');
+    pendingAnswerRef.current = '';
+    revealedRef.current = 0;
+    flushTimerRef.current = null;
     setStreaming({ question: trimmed, answer: '', sources: [] });
 
     try {
@@ -202,6 +252,9 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
         onRestart: () => {
           // A provider died mid-answer; the fallback model starts the
           // answer over from the top.
+          pendingAnswerRef.current = '';
+          revealedRef.current = 0;
+          flushTimerRef.current = null;
           setStreaming((prev) =>
             prev
               ? {
@@ -215,6 +268,10 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
       });
 
       if (res) {
+        // Let the reveal finish typing the full answer before committing to
+        // history, so the card never clears mid-typing.
+        await waitForRevealComplete();
+        stopReveal();
         setChatHistory((prev) => [
           ...prev,
           {
