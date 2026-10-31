@@ -122,6 +122,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     return () => {
       if (flushTimerRef.current !== null) {
         clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
       }
     };
   }, []);
@@ -224,6 +225,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     setQuestion('');
     pendingAnswerRef.current = '';
     revealedRef.current = 0;
+    flushTimerRef.current = null; // ensure the reveal timer starts fresh every answer
     setStreaming({ question: trimmed, answer: '', sources: [] });
 
     try {
