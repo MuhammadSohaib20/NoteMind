@@ -35,23 +35,23 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   const { chatHistory, setChatHistory } = useChatHistory();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
-  // Live streaming turn: each SSE delta updates the answer as it lands. A
-  // paced reveal timer types the text out at a steady human-readable pace
-  // (~40 chars/sec) so the answer reads like live streaming no matter how
-  // fast the model actually delivers it.
+  // Live streaming turn: each SSE delta appends to the pending answer, and a
+  // paced reveal timer types it out at a steady human-readable pace (~60
+  // chars/sec). Fallback answers (no deltas from the server) use the done
+  // frame's answer so every answer streams visibly.
   const [streaming, setStreaming] = useState<{
     question: string;
     answer: string;
     sources: ChatTurn['sources'];
     notice?: string;
   } | null>(null);
-  const pendingAnswerRef = useRef('');      // full text accumulated from deltas
+  const pendingAnswerRef = useRef('');      // full answer text (deltas or fallback)
   const revealedRef = useRef(0);             // how many chars are visible now
   const flushTimerRef = useRef<number | null>(null);
 
-  // ~40 chars/sec typing pace, ticking every 80ms.
-  const REVEAL_CHARS_PER_SEC = 40;
-  const REVEAL_TICK_MS = 80;
+  // ~60 chars/sec typing pace, ticking every 60ms.
+  const REVEAL_CHARS_PER_SEC = 60;
+  const REVEAL_TICK_MS = 60;
   const REVEAL_STEP_CHARS = Math.max(1, Math.round((REVEAL_CHARS_PER_SEC * REVEAL_TICK_MS) / 1000));
 
   const revealTick = () => {
@@ -80,8 +80,6 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     }
   };
 
-  // Wait for the reveal timer to finish showing everything before clearing
-  // the card, so the user always sees the complete answer.
   const waitForRevealComplete = (): Promise<void> =>
     new Promise((resolve) => {
       const check = () => {
@@ -220,9 +218,9 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     const trimmed = qText.trim();
     if (!trimmed) return;
     setQuestion('');
+    stopReveal();                          // cancel any leftover timer from previous answer
     pendingAnswerRef.current = '';
     revealedRef.current = 0;
-    flushTimerRef.current = null;
     setStreaming({ question: trimmed, answer: '', sources: [] });
 
     try {
@@ -268,8 +266,11 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
       });
 
       if (res) {
-        // Let the reveal finish typing the full answer before committing to
-        // history, so the card never clears mid-typing.
+        // If no deltas arrived (fallback / keyword / not-found paths), use the
+        // done frame's answer so it still types out visibly instead of popping in.
+        if (pendingAnswerRef.current === '' && res.answer) {
+          pendingAnswerRef.current = res.answer;
+        }
         await waitForRevealComplete();
         stopReveal();
         setChatHistory((prev) => [
