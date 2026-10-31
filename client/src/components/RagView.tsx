@@ -35,28 +35,9 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   const { chatHistory, setChatHistory } = useChatHistory();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
-  // One-time build hint: only the current build (with live answer streaming)
-  // renders this chip, so seeing it confirms the tab is up to date — a tab
-  // running stale code shows no chip at all. Dismissed after the user's
-  // first completed answer in this tab (or by clicking it).
-  const [showStreamHint, setShowStreamHint] = useState(() => {
-    try {
-      return !sessionStorage.getItem('notemind_stream_hint_seen');
-    } catch {
-      return false;
-    }
-  });
-  const dismissStreamHint = () => {
-    try {
-      sessionStorage.setItem('notemind_stream_hint_seen', '1');
-    } catch {
-      /* private mode etc. — the hint simply returns next session */
-    }
-    setShowStreamHint(false);
-  };
-
   // Live streaming turn: the answer accumulates as SSE deltas arrive, so the
-  // card below shows the answer typing itself instead of a waiting spinner.
+  // card below shows each delta as it lands, instead of waiting for one whole
+  // response before rendering anything.
   const [streaming, setStreaming] = useState<{
     question: string;
     answer: string;
@@ -65,21 +46,15 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   } | null>(null);
   const pendingAnswerRef = useRef('');
   const flushTimerRef = useRef<number | null>(null);
-  // Paced reveal: how much of the streamed answer the user has seen so far,
-  // and the pace (characters/second) of that reveal. The models are fast
-  // enough to deliver an entire answer within a few hundred milliseconds,
-  // which would make it "pop in" all at once — pacing the reveal makes the
-  // answer read like live typing no matter how quickly the provider streams.
-  // 180 chars/sec is deliberately readable: a typical answer types out over
-  // several seconds, like mainstream chat products.
-  const revealedRef = useRef(0);
-  const REVEAL_CHARS_PER_SEC = 180;
-  const REVEAL_TICK_MS = 100;
-  const REVEAL_STEP_CHARS = Math.round((REVEAL_CHARS_PER_SEC * REVEAL_TICK_MS) / 1000);
 
-  // Single self-scheduling timer: every REVEAL_TICK_MS advance the revealed
-  // slice by the amount the chosen pace implies, bounded by what has actually
-  // streamed in so far. It stops once the whole answer has been revealed.
+  // Paced reveal: models can deliver an entire answer within a few hundred
+  // milliseconds, which would make it "pop in" all at once. The reveal timer
+  // advances the visible slice at a steady typing pace so every answer —
+  // model or fallback — streams visibly instead of appearing wholesale.
+  const revealedRef = useRef(0);
+  const REVEAL_STEP_CHARS = 18; // ~180 chars/sec at 100ms ticks
+  const REVEAL_TICK_MS = 100;
+
   const revealTick = () => {
     flushTimerRef.current = null;
     const full = pendingAnswerRef.current;
@@ -103,20 +78,13 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
       flushTimerRef.current = null;
     }
   };
-  // The stream is done — but the reveal may still be catching up, because a
-  // fast model delivers the whole answer in a single burst. Keep the card up
-  // and resolve only once the full text has been revealed, so the caller
-  // never clears the answer mid-typing.
   const finishReveal = (): Promise<void> => {
     if (flushTimerRef.current === null && revealedRef.current < pendingAnswerRef.current.length) {
-      flushTimerRef.current = window.setTimeout(revealTick, 100);
+      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
     }
     return new Promise((resolve) => {
-      let tries = 0;
       const check = () => {
-        // The tries cap guards against navigating away mid-reveal (the reveal
-        // timer dies with the view, so the promise must not wait forever).
-        if (revealedRef.current >= pendingAnswerRef.current.length || tries++ > 200) resolve();
+        if (revealedRef.current >= pendingAnswerRef.current.length) resolve();
         else window.setTimeout(check, 80);
       };
       check();
@@ -301,9 +269,6 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
 
       stopReveal();
       if (res) {
-        // The current build delivered and finished typing the answer — the
-        // build hint has served its purpose.
-        dismissStreamHint();
         // Type out whatever is left before committing to history: a fast
         // model delivers the whole answer in one burst, and the extractive
         // fallback arrives with no deltas at all — so the reveal has to finish
@@ -537,21 +502,6 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                 </div>
               )}
             </div>
-
-            {/* One-time build hint (current builds only): proves the tab runs
-                the streaming UI and disappears after the first answer. */}
-            {showStreamHint && (
-              <div className="px-4 pb-1 flex items-center justify-center">
-                <button
-                  type="button"
-                  onClick={dismissStreamHint}
-                  className="inline-flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full px-3 py-1 hover:text-slate-700 dark:hover:text-slate-200 transition"
-                >
-                  <Sparkles className="w-3 h-3 text-violet-500 dark:text-violet-400" />
-                  Answers stream in live — you'll see them type out
-                </button>
-              </div>
-            )}
 
             {/* Bottom Input Bar */}
             <form
