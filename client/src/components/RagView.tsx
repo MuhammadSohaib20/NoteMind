@@ -35,17 +35,16 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   const { chatHistory, setChatHistory } = useChatHistory();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
 
-  // Live streaming turn: the answer accumulates as SSE deltas arrive, so the
-  // card below shows each delta as it lands, instead of waiting for one whole
-  // response before rendering anything.
+  // Live streaming turn: each SSE delta updates the answer as it lands, so
+  // the user sees the answer type out instead of waiting for one whole
+  // response before anything renders.
   const [streaming, setStreaming] = useState<{
     question: string;
     answer: string;
     sources: ChatTurn['sources'];
     notice?: string;
   } | null>(null);
-  // Each delta appends directly to the answer as it lands, so the user sees
-  // the answer type out instead of waiting for one whole response.
+
   const scheduleStreamingAnswer = (text: string) => {
     setStreaming((prev) =>
       prev ? { ...prev, answer: text } : prev
