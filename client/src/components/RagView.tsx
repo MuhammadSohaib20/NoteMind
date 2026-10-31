@@ -44,51 +44,12 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     sources: ChatTurn['sources'];
     notice?: string;
   } | null>(null);
-  const pendingAnswerRef = useRef('');
-  const flushTimerRef = useRef<number | null>(null);
-
-  // Paced reveal: models can deliver an entire answer within a few hundred
-  // milliseconds, which would make it "pop in" all at once. The reveal timer
-  // advances the visible slice at a steady typing pace so every answer —
-  // model or fallback — streams visibly instead of appearing wholesale.
-  const revealedRef = useRef(0);
-  const REVEAL_STEP_CHARS = 18; // ~180 chars/sec at 100ms ticks
-  const REVEAL_TICK_MS = 100;
-
-  const revealTick = () => {
-    flushTimerRef.current = null;
-    const full = pendingAnswerRef.current;
-    const revealed = Math.min(full.length, revealedRef.current + REVEAL_STEP_CHARS);
-    revealedRef.current = revealed;
-    const visible = full.slice(0, revealed);
-    setStreaming((prev) => (prev ? { ...prev, answer: visible } : prev));
-    if (revealed < full.length) {
-      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
-    }
-  };
+  // Each delta appends directly to the answer as it lands, so the user sees
+  // the answer type out instead of waiting for one whole response.
   const scheduleStreamingAnswer = (text: string) => {
-    pendingAnswerRef.current = text;
-    if (flushTimerRef.current === null) {
-      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
-    }
-  };
-  const stopReveal = () => {
-    if (flushTimerRef.current !== null) {
-      clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-    }
-  };
-  const finishReveal = (): Promise<void> => {
-    if (flushTimerRef.current === null && revealedRef.current < pendingAnswerRef.current.length) {
-      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
-    }
-    return new Promise((resolve) => {
-      const check = () => {
-        if (revealedRef.current >= pendingAnswerRef.current.length) resolve();
-        else window.setTimeout(check, 80);
-      };
-      check();
-    });
+    setStreaming((prev) =>
+      prev ? { ...prev, answer: prev.answer + text } : prev
+    );
   };
 
   // AI Index panel state. The selection is intentionally NOT persisted: every
@@ -116,16 +77,6 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     );
     return () => clearInterval(timer);
   }, [isAsking]);
-
-  // Never leave a pending Markdown flush behind on unmount.
-  useEffect(() => {
-    return () => {
-      if (flushTimerRef.current !== null) {
-        clearTimeout(flushTimerRef.current);
-        flushTimerRef.current = null;
-      }
-    };
-  }, []);
 
   const displayName = user?.fullName || 'Muhammad Sohaib';
   const initials = displayName
@@ -223,9 +174,6 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     const trimmed = qText.trim();
     if (!trimmed) return;
     setQuestion('');
-    pendingAnswerRef.current = '';
-    revealedRef.current = 0;
-    flushTimerRef.current = null; // ensure the reveal timer starts fresh every answer
     setStreaming({ question: trimmed, answer: '', sources: [] });
 
     try {
@@ -255,8 +203,6 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
         onRestart: () => {
           // A provider died mid-answer; the fallback model starts the
           // answer over from the top.
-          pendingAnswerRef.current = '';
-          revealedRef.current = 0;
           setStreaming((prev) =>
             prev
               ? {
@@ -269,15 +215,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
         },
       });
 
-      stopReveal();
       if (res) {
-        // Type out whatever is left before committing to history: a fast
-        // model delivers the whole answer in one burst, and the extractive
-        // fallback arrives with no deltas at all — so the reveal has to finish
-        // here or the card would clear mid-typing.
-        pendingAnswerRef.current = res.answer;
-        await finishReveal();
-        stopReveal();
         setChatHistory((prev) => [
           ...prev,
           {
@@ -291,7 +229,6 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     } catch {
       // Hard failure (network dropped / stream died): drop the partial
       // bubble; the error banner below the chat explains what happened.
-      stopReveal();
       setStreaming(null);
     }
   };
