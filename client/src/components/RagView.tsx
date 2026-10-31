@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Brain,
   Send,
@@ -48,7 +48,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   // the answer type out instead of waiting for one whole response.
   const scheduleStreamingAnswer = (text: string) => {
     setStreaming((prev) =>
-      prev ? { ...prev, answer: prev.answer + text } : prev
+      prev ? { ...prev, answer: text } : prev
     );
   };
 
