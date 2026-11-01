@@ -3,15 +3,6 @@ import { RagResponse, RagResultNote, RagSource } from '../types';
 
 const BASE_URL = '/api/v1';
 
-export interface AskStreamCallbacks {
-  /** Retrieval finished: matched notes and sources are known (early render). */
-  onMeta?: (data: { retrievedNotes: RagResultNote[]; sources: RagSource[] }) => void;
-  /** Called with the FULL answer text accumulated so far. */
-  onDelta?: (accumulated: string) => void;
-  /** Partial answer discarded — a fallback model is restarting it. */
-  onRestart?: (reason: string) => void;
-}
-
 export interface AskParams {
   question: string;
   topK?: number;
@@ -19,15 +10,13 @@ export interface AskParams {
   noteIds?: string[];
 }
 
-/**
- * Asks the assistant via the STREAMING endpoint (POST /rag/ask/stream).
- *
- * The server sends Server-Sent Events: `meta` (retrieved notes), a series of
- * `delta` frames (the answer, piece by piece — the UI shows it typing), an
- * optional `restart` (the provider died mid-answer and the fallback model is
- * starting over), and a final `done` carrying the complete answer. The
- * mutation stays pending until `done`, so `isAsking` covers the whole turn.
- */
+export interface AskStreamCallbacks {
+  onMeta?: (meta: { retrievedNotes: RagResultNote[]; sources: RagSource[] }) => void;
+  onDelta?: (answer: string) => void;
+  onRestart?: () => void;
+}
+
+/** Streams answer deltas from POST /rag/ask/stream. */
 export function useRag() {
   const askRagMutation = useMutation({
     mutationFn: async ({
@@ -50,44 +39,46 @@ export function useRag() {
       });
 
       if (!response.ok || !response.body) {
-        throw new Error(`AI request failed (HTTP ${response.status})`);
+        if (response.status === 401) {
+          localStorage.removeItem('notemind_token');
+          localStorage.removeItem('notemind_user');
+        }
+        const body = await response.json().catch(() => null);
+        throw new Error(body?.error?.message || `AI request failed (HTTP ${response.status})`);
       }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
-      let eventName = '';
-      let frameLines: string[] = [];
+      let eventLines: string[] = [];
       let answer = '';
-      // Held in an object so TypeScript does not narrow it to `null` below
-      // (it is assigned inside the SSE-reading closure).
-      const state: { final: RagResponse | null } = { final: null };
+      let finalResponse: RagResponse | null = null;
 
-      const dispatchFrame = (frame: string) => {
-        let data = '';
-        for (const line of frame.split('\n')) {
-          if (line.startsWith('event:')) eventName = line.slice(6).trim();
-          else if (line.startsWith('data:')) data += line.slice(5).trim();
+      const dispatchFrame = (lines: string[]) => {
+        let event = 'message';
+        const data: string[] = [];
+        for (const line of lines) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
         }
-        if (!data) return;
+        if (data.length === 0) return;
 
-        let payload: any;
-        try {
-          payload = JSON.parse(data);
-        } catch {
-          return;
-        }
-
-        if (eventName === 'meta') {
-          onMeta?.(payload);
-        } else if (eventName === 'delta') {
+        const payload = JSON.parse(data.join('\n'));
+        if (event === 'meta') {
+          onMeta?.({
+            retrievedNotes: payload.retrievedNotes ?? [],
+            sources: payload.sources ?? [],
+          });
+        } else if (event === 'delta') {
           answer += payload.text ?? '';
           onDelta?.(answer);
-        } else if (eventName === 'restart') {
+        } else if (event === 'restart') {
           answer = '';
-          onRestart?.(payload.reason);
-        } else if (eventName === 'done') {
-          state.final = {
+          onRestart?.();
+        } else if (event === 'error') {
+          throw new Error(payload.message || 'The answer stream failed.');
+        } else if (event === 'done') {
+          finalResponse = {
             question: payload.question,
             answer: payload.answer,
             retrievedNotes: payload.retrievedNotes ?? [],
@@ -97,29 +88,37 @@ export function useRag() {
         }
       };
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let newlineAt: number;
-        while ((newlineAt = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, newlineAt);
-          buffer = buffer.slice(newlineAt + 1);
-          if (line.trim() === '') {
-            // Blank line = one complete SSE frame.
-            dispatchFrame(frameLines.join('\n'));
-            frameLines = [];
-          } else {
-            frameLines.push(line);
-          }
+      const processLine = (line: string) => {
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        if (line.length === 0) {
+          dispatchFrame(eventLines);
+          eventLines = [];
+        } else {
+          eventLines.push(line);
         }
+      };
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          buffer += decoder.decode(value, { stream: !done });
+          let newlineAt: number;
+          while ((newlineAt = buffer.indexOf('\n')) !== -1) {
+            processLine(buffer.slice(0, newlineAt));
+            buffer = buffer.slice(newlineAt + 1);
+          }
+          if (done) break;
+        }
+        if (buffer.length > 0) processLine(buffer);
+        if (eventLines.length > 0) dispatchFrame(eventLines);
+      } finally {
+        reader.releaseLock();
       }
 
-      if (!state.final) {
-        throw new Error('The AI answer stream ended unexpectedly. Please try again.');
+      if (!finalResponse) {
+        throw new Error('The answer stream ended unexpectedly. Please try again.');
       }
-      return state.final;
+      return finalResponse;
     },
   });
 
@@ -127,8 +126,6 @@ export function useRag() {
     askRag: askRagMutation.mutateAsync,
     isAsking: askRagMutation.isPending,
     error: askRagMutation.error,
-    // Resolves to the final answer once the `done` frame arrives (legacy
-    // consumers that render the complete response read it from here).
     data: askRagMutation.data,
     reset: askRagMutation.reset,
   };

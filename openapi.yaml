@@ -663,6 +663,52 @@ paths:
                     type: boolean
                     description: True when no generation provider was available and the answer fell back to extractive mode
 
+  /rag/ask/stream:
+    post:
+      summary: Stream an Ask My Notes answer
+      description: Uses the same retrieval and response payload as /rag/ask, but sends Server-Sent Events so generated text appears as it is produced.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - question
+              properties:
+                question:
+                  type: string
+                topK:
+                  type: integer
+                  default: 3
+                collectionIds:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: string
+                    format: uuid
+                noteIds:
+                  type: array
+                  maxItems: 200
+                  items:
+                    type: string
+                    format: uuid
+      responses:
+        '200':
+          description: Server-Sent Events in meta, delta, optional restart, and done frames
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |-
+                  event: delta
+                  data: {"text":"Your notes say..."}
+
+                  event: done
+                  data: {"question":"...","answer":"...","retrievedNotes":[],"sources":[],"degraded":false}
+
 components:
   securitySchemes:
     BearerAuth:

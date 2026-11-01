@@ -366,6 +366,9 @@ export async function listNotes(
       userId,
       formattedData.filter((n: any) => !n.indexed)
     );
+    for (const note of formattedData) {
+      note.indexingPending = autoIndexingNotes.has(`${userId}:${note.id}`);
+    }
 
     return res.status(200).json({
       success: true,
@@ -1107,18 +1110,29 @@ export async function indexNotes(
  * step. Never throws: on failure the note simply stays unindexed (the manual
  * endpoint still works as a fallback) and the reason is logged.
  */
+const autoIndexingNotes = new Set<string>();
+
 function scheduleAutoIndex(db: any, userId: string, noteIds: string[], label: string): void {
+  const pendingIds = noteIds.filter((id) => !autoIndexingNotes.has(`${userId}:${id}`));
+  if (pendingIds.length === 0) return;
+  for (const id of pendingIds) autoIndexingNotes.add(`${userId}:${id}`);
+
   void (async () => {
-    if (!getEmbeddingProvider()) return; // AI not configured - nothing to do
+    if (!getEmbeddingProvider()) {
+      for (const id of pendingIds) autoIndexingNotes.delete(`${userId}:${id}`);
+      return;
+    }
     const startedAt = Date.now();
     try {
-      const { summary } = await runIndexNotes(db, userId, noteIds);
+      const { summary } = await runIndexNotes(db, userId, pendingIds);
       console.log(
         `[index] auto-index ${label} finished in ${Date.now() - startedAt}ms: ` +
           `indexed=${summary.indexed} upToDate=${summary.upToDate} failed=${summary.failed}`
       );
     } catch (error) {
       console.warn(`[index] auto-index ${label} failed: ${(error as Error).message}`);
+    } finally {
+      for (const id of pendingIds) autoIndexingNotes.delete(`${userId}:${id}`);
     }
   })();
 }

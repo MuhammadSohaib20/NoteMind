@@ -74,6 +74,8 @@ export interface Note {
    * running in the background. The list query polls until it flips to false.
    */
   extractionPending?: boolean;
+  /** True while server-side automatic embedding is in progress. */
+  indexingPending?: boolean;
 }
 
 /** Per-note result of POST /notes/index. */

@@ -23,6 +23,7 @@ interface RagViewProps {
 
 /** POST /notes/index accepts at most 50 ids per request. */
 const INDEX_BATCH_SIZE = 50;
+const ANSWER_REVEAL_INTERVAL_MS = 20;
 
 export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNote }) => {
   const { user } = useAuth();
@@ -34,67 +35,57 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   // it survives navigation between pages and is only cleared on logout.
   const { chatHistory, setChatHistory } = useChatHistory();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
-
-  // Live streaming turn: each SSE delta appends to the pending answer, and a
-  // paced reveal timer types it out at a steady human-readable pace (~60
-  // chars/sec). Fallback answers (no deltas from the server) use the done
-  // frame's answer so every answer streams visibly.
   const [streaming, setStreaming] = useState<{
     question: string;
     answer: string;
     sources: ChatTurn['sources'];
     notice?: string;
   } | null>(null);
-  const pendingAnswerRef = useRef('');      // full answer text (deltas or fallback)
-  const revealedRef = useRef(0);             // how many chars are visible now
-  const flushTimerRef = useRef<number | null>(null);
+  const pendingAnswerRef = useRef('');
+  const visibleCharacterCountRef = useRef(0);
+  const revealCompleteRef = useRef<(() => void) | null>(null);
+  const askInFlightRef = useRef(false);
+  const awaitingRestartedAnswerRef = useRef(false);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
-  // ~60 chars/sec typing pace, ticking every 60ms.
-  const REVEAL_CHARS_PER_SEC = 60;
-  const REVEAL_TICK_MS = 60;
-  const REVEAL_STEP_CHARS = Math.max(1, Math.round((REVEAL_CHARS_PER_SEC * REVEAL_TICK_MS) / 1000));
-
-  const revealTick = () => {
-    flushTimerRef.current = null;
-    const full = pendingAnswerRef.current;
-    const revealed = Math.min(full.length, revealedRef.current + REVEAL_STEP_CHARS);
-    revealedRef.current = revealed;
-    const visible = full.slice(0, revealed);
-    setStreaming((prev) => (prev ? { ...prev, answer: visible } : prev));
-    if (revealed < full.length) {
-      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
-    }
-  };
-
-  const scheduleStreamingAnswer = (text: string) => {
-    pendingAnswerRef.current = text;
-    if (flushTimerRef.current === null) {
-      flushTimerRef.current = window.setTimeout(revealTick, REVEAL_TICK_MS);
-    }
-  };
-
-  const stopReveal = () => {
-    if (flushTimerRef.current !== null) {
-      clearTimeout(flushTimerRef.current);
-      flushTimerRef.current = null;
-    }
-  };
-
-  const waitForRevealComplete = (): Promise<void> =>
-    new Promise((resolve) => {
-      const check = () => {
-        if (revealedRef.current >= pendingAnswerRef.current.length) resolve();
-        else window.setTimeout(check, 50);
-      };
-      check();
-    });
-
-  // Never leave a pending reveal timer behind on unmount.
   useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, [streaming?.answer, streaming?.question, chatHistory.length]);
+
+  useEffect(() => {
+    if (!streaming) return;
+
+    const timer = window.setInterval(() => {
+      const characters = Array.from(pendingAnswerRef.current);
+      if (visibleCharacterCountRef.current < characters.length) {
+        visibleCharacterCountRef.current += 1;
+        const answer = characters.slice(0, visibleCharacterCountRef.current).join('');
+        setStreaming((current) => (current ? { ...current, answer } : current));
+      }
+
+      if (visibleCharacterCountRef.current >= characters.length) {
+        revealCompleteRef.current?.();
+        revealCompleteRef.current = null;
+      }
+    }, ANSWER_REVEAL_INTERVAL_MS);
+
     return () => {
-      stopReveal();
+      window.clearInterval(timer);
+      revealCompleteRef.current?.();
+      revealCompleteRef.current = null;
     };
-  }, []);
+  }, [Boolean(streaming)]);
+
+  const waitForAnswerReveal = () =>
+    new Promise<void>((resolve) => {
+      if (visibleCharacterCountRef.current >= Array.from(pendingAnswerRef.current).length) {
+        resolve();
+      } else {
+        revealCompleteRef.current = resolve;
+      }
+    });
 
   // AI Index panel state. The selection is intentionally NOT persisted: every
   // visit starts fresh, so the assistant only ever analyses the notes the
@@ -216,11 +207,12 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
 
   const submitQuestion = async (qText: string) => {
     const trimmed = qText.trim();
-    if (!trimmed) return;
+    if (!trimmed || askInFlightRef.current) return;
+    askInFlightRef.current = true;
     setQuestion('');
-    stopReveal();                          // cancel any leftover timer from previous answer
     pendingAnswerRef.current = '';
-    revealedRef.current = 0;
+    visibleCharacterCountRef.current = 0;
+    awaitingRestartedAnswerRef.current = false;
     setStreaming({ question: trimmed, answer: '', sources: [] });
 
     try {
@@ -229,64 +221,53 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
         topK: 4,
         noteIds: scopedNoteIds,
         onMeta: (meta) => {
-          // Matched notes + sources are known before generation starts, so
-          // they appear live while the answer is still streaming.
-          setStreaming((prev) =>
-            prev
+          setStreaming((current) =>
+            current
               ? {
-                  ...prev,
-                  sources: (meta.sources ?? []).map((src) => ({
-                    id: src.noteId,
-                    title: src.title,
-                    content: src.chunkContent,
-                    collectionName: src.collectionName,
-                    similarity: src.similarity,
-                  })),
+                  ...current,
+                  sources: meta.retrievedNotes,
                 }
-              : prev
+              : current
           );
         },
-        onDelta: scheduleStreamingAnswer,
+        onDelta: (answer) => {
+          if (awaitingRestartedAnswerRef.current) {
+            awaitingRestartedAnswerRef.current = false;
+            setStreaming((current) =>
+              current ? { ...current, answer: '', notice: undefined } : current
+            );
+          }
+          pendingAnswerRef.current = answer;
+        },
         onRestart: () => {
-          // A provider died mid-answer; the fallback model starts the
-          // answer over from the top.
+          // Keep the partial response on screen until the replacement stream
+          // starts, then reveal the replacement from its own first character.
           pendingAnswerRef.current = '';
-          revealedRef.current = 0;
-          flushTimerRef.current = null;
-          setStreaming((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  answer: '',
-                  notice: 'The AI got disconnected — retrying with a fallback model…',
-                }
-              : prev
+          visibleCharacterCountRef.current = 0;
+          awaitingRestartedAnswerRef.current = true;
+          setStreaming((current) =>
+            current
+              ? { ...current, notice: 'Reconnecting to another AI model…' }
+              : current
           );
         },
       });
 
-      if (res) {
-        // If no deltas arrived (fallback / keyword / not-found paths), use the
-        // done frame's answer so it still types out visibly instead of popping in.
-        if (pendingAnswerRef.current === '' && res.answer) {
-          pendingAnswerRef.current = res.answer;
-        }
-        await waitForRevealComplete();
-        stopReveal();
-        setChatHistory((prev) => [
-          ...prev,
-          {
-            question: trimmed,
-            answer: res.answer,
-            sources: res.retrievedNotes || [],
-          },
-        ]);
-      }
-      setStreaming(null);
+      pendingAnswerRef.current = res.answer;
+      await waitForAnswerReveal();
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          question: trimmed,
+          answer: res.answer,
+          sources: res.retrievedNotes || [],
+        },
+      ]);
     } catch {
-      // Hard failure (network dropped / stream died): drop the partial
-      // bubble; the error banner below the chat explains what happened.
+      // The mutation error is shown below the chat.
+    } finally {
       setStreaming(null);
+      askInFlightRef.current = false;
     }
   };
 
@@ -324,7 +305,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     'Find information about my project ideas',
   ];
 
-  // "Matched Notes" grid, shared by the streaming card and the final card.
+  // Matched notes shown with each completed answer.
   const renderSourceGrid = (sources: ChatTurn['sources']) => (
     <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
       <span className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
@@ -364,8 +345,8 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
         <div className="flex-1 min-w-0 flex flex-col p-3 sm:p-5 overflow-hidden">
           <div className="flex-1 bg-slate-100/70 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800 rounded-2xl flex flex-col overflow-hidden">
             {/* Scrollable Messages / Welcome View */}
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
-              {chatHistory.length === 0 && !isAsking ? (
+            <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
+              {chatHistory.length === 0 && !isAsking && !streaming ? (
                 <div className="h-full flex flex-col items-center justify-center text-center max-w-lg mx-auto py-8">
                   <div className="w-14 h-14 rounded-2xl bg-indigo-100 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mb-4 shadow-xs">
                     <Brain className="w-8 h-8" />
@@ -383,6 +364,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                         key={idx}
                         type="button"
                         onClick={() => submitQuestion(prompt)}
+                        disabled={isAsking}
                         className="px-4 py-2 bg-white dark:bg-slate-900 hover:bg-blue-50 dark:hover:bg-blue-950/50 text-blue-600 dark:text-blue-400 border border-blue-200/80 dark:border-blue-800/80 rounded-xl text-xs font-medium shadow-2xs transition flex items-center gap-2"
                       >
                         <Sparkles className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 shrink-0" />
@@ -436,7 +418,6 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                     </div>
                   ))}
 
-                  {/* Live streaming turn — the answer types itself in. */}
                   {streaming && (
                     <div className="space-y-3">
                       <div className="flex justify-end">
@@ -444,36 +425,30 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                           {streaming.question}
                         </div>
                       </div>
-
                       <div className="bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-2xl p-5 shadow-xs space-y-4">
                         <div className="flex items-center gap-2 text-xs font-bold text-blue-600 dark:text-blue-400">
                           <Brain className="w-4 h-4" />
                           <span>NoteMind AI</span>
                           <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                            writing
+                            {streaming.answer ? 'responding' : 'thinking'}
                           </span>
                         </div>
-
                         {streaming.notice && (
-                          <p className="text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-lg px-3 py-2">
-                            {streaming.notice}
+                          <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                            {streaming.notice} Your answer will stay visible while it retries.
                           </p>
                         )}
-
                         {streaming.answer ? (
                           <div>
                             <MarkdownContent text={streaming.answer} />
                             <span className="inline-block w-2 h-4 bg-blue-600/70 animate-pulse ml-0.5 align-middle" />
                           </div>
                         ) : (
-                          !streaming.notice && (
-                            <p className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">
-                              Searching your notes and starting the answer…
-                            </p>
-                          )
+                          <p className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">
+                            Searching your notes and preparing an answer…
+                          </p>
                         )}
-
                         {streaming.sources.length > 0 && renderSourceGrid(streaming.sources)}
                       </div>
                     </div>
@@ -598,7 +573,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
               </p>
             ) : (
               listedNotes.map((note) => {
-                const isIndexingNow = indexingIds.has(note.id);
+                const isIndexingNow = indexingIds.has(note.id) || note.indexingPending;
                 return (
                   <label
                     key={note.id}
@@ -615,7 +590,9 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                         {note.title}
                       </span>
                       <span className="mt-0.5 flex items-center gap-1 text-[10px]">
-                        {isIndexingNow ? (
+                        {note.extractionPending ? (
+                          <span className="text-violet-600 dark:text-violet-400 font-semibold">Extracting...</span>
+                        ) : isIndexingNow ? (
                           <>
                             <span className="w-2.5 h-2.5 border-[1.5px] border-violet-500 border-t-transparent rounded-full animate-spin" />
                             <span className="text-violet-600 dark:text-violet-400 font-semibold">Indexing...</span>

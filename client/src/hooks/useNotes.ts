@@ -23,12 +23,11 @@ export function useNotes(collectionId?: string, tag?: string, search?: string) {
       return res.data || [];
     },
     enabled: !!user?.id,
-    // While any import is still extracting its text in the background, poll
-    // so the finished content appears without a manual refresh. Polling stops
-    // the moment nothing is pending.
+    // Keep imported note content and its auto-index status fresh while
+    // extraction or background embedding is running.
     refetchInterval: (query) => {
       const data = query.state.data as Note[] | undefined;
-      return data?.some((note) => note.extractionPending) ? 4000 : false;
+      return data?.some((note) => note.extractionPending || note.indexingPending) ? 1500 : false;
     },
   });
 

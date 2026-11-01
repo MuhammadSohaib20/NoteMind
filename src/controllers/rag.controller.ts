@@ -117,27 +117,6 @@ function buildExtractiveAnswer(chunks: RetrievedChunk[]): string {
 }
 
 /**
- * Sends a finished answer as a short series of `delta` frames so the caller
- * only has to follow up with `done`.
- *
- * Used for the fallback answers — the extractive "here is what your notes
- * say" reply, the keyword-mode reply, and the "not found" line — so that
- * EVERY answer reaches the UI the same way (meta → delta* → done) and types
- * itself out, instead of model answers streaming while fallback answers pop
- * in whole. The pieces are the answer's own paragraphs, so concatenating the
- * deltas reproduces the original text exactly.
- */
-function streamAnswerInChunks(
-  answer: string,
-  send: (event: string, data: unknown) => void
-): void {
-  // Keep the blank-line separators so the joined deltas equal the answer.
-  for (const piece of answer.split(/(\n{2,})/)) {
-    if (piece.length > 0) send('delta', { text: piece });
-  }
-}
-
-/**
  * Legacy keyword-scored search, used only when no embedding provider is
  * configured. Keeps the endpoint working before an API key is added.
  */
@@ -227,12 +206,11 @@ async function keywordSearch(
 }
 
 /**
- * The retrieval pipeline shared by the one-shot (`/rag/ask`) and streaming
- * (`/rag/ask/stream`) endpoints: embed the question, run the vector search,
- * then keep the strongest chunks of each matching note.
+ * Embeds the question, runs vector search, then keeps the strongest chunks
+ * of each matching note for the one-shot answer endpoint.
  *
  * Returns `mode: 'keyword'` when no embedding provider is configured so the
- * endpoints keep working before an API key is added.
+ * endpoint keeps working before an API key is added.
  */
 async function retrieve(
   db: any,
@@ -437,14 +415,144 @@ export async function askNotes(
   }
 }
 
-/** One cited passage in the `sources` array of an answer. */
-interface AnswerSource {
-  index: number;
-  noteId: string;
-  title: string;
-  collectionName: string;
-  similarity: number;
-  chunkContent: string;
+export async function askRagStream(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const { question, topK = 3 } = req.body;
+  const collectionIds: string[] = Array.isArray(req.body.collectionIds)
+    ? req.body.collectionIds.filter(Boolean)
+    : [];
+  const noteIds: string[] = Array.isArray(req.body.noteIds)
+    ? req.body.noteIds.filter(Boolean)
+    : [];
+
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const send = (event: string, data: unknown) => {
+    if (!res.destroyed) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+  let clientGone = false;
+  res.on('close', () => {
+    if (!res.writableEnded) clientGone = true;
+  });
+
+  try {
+    const retrieval = await retrieve(
+      await getDatabase(),
+      userId,
+      question,
+      topK,
+      collectionIds,
+      noteIds
+    );
+    if (clientGone) return;
+
+    if (retrieval.mode === 'keyword') {
+      const { retrievedNotes } = retrieval;
+      const answer = buildKeywordAnswer(retrievedNotes);
+      send('meta', { retrievedNotes, sources: [] });
+      send('delta', { text: answer });
+      send('done', { question, answer, retrievedNotes, sources: [], degraded: true });
+      res.end();
+      return;
+    }
+
+    const { contextChunks, retrievedNotes } = retrieval;
+    const sources = contextChunks.map((chunk, index) => ({
+      index: index + 1,
+      noteId: chunk.noteId,
+      title: chunk.title,
+      collectionName: chunk.collectionName,
+      similarity: toPercent(chunk.similarity),
+      chunkContent: chunk.chunkContent,
+    }));
+    send('meta', { retrievedNotes, sources });
+
+    if (contextChunks.length === 0) {
+      const answer = "I couldn't find that in your notes.";
+      send('delta', { text: answer });
+      send('done', { question, answer, retrievedNotes, sources, degraded: false });
+      res.end();
+      return;
+    }
+
+    const provider = getGenerationProvider();
+    if (!provider) {
+      const answer = buildExtractiveAnswer(contextChunks);
+      send('delta', { text: answer });
+      send('done', { question, answer, retrievedNotes, sources, degraded: true });
+      res.end();
+      return;
+    }
+
+    let answer = '';
+    let degraded = false;
+    const deadline = Date.now() + aiConfig.genDeadlineMs;
+    const generationRequest = {
+      systemInstruction: SYSTEM_INSTRUCTION,
+      prompt: `Context:\n\n${buildContext(contextChunks)}\n\nQuestion: ${question}`,
+      temperature: 0.2,
+      maxOutputTokens: 4096,
+    };
+    const stream = provider.generateStream
+      ? provider.generateStream(generationRequest)
+      : (async function* () {
+          yield {
+            type: 'delta' as const,
+            text: await provider.generate(generationRequest),
+          };
+        })();
+
+    const iterator = stream[Symbol.asyncIterator]();
+    try {
+      while (!clientGone) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          degraded = true;
+          console.warn('[rag] streamed generation reached its deadline');
+          break;
+        }
+        const step = await withDeadline(iterator.next(), remaining, 'generation');
+        if (step.done) break;
+        const event = step.value;
+        if (event.type === 'restart') {
+          answer = '';
+          send('restart', { reason: event.reason });
+        } else {
+          answer += event.text;
+          send('delta', { text: event.text });
+        }
+      }
+    } catch (error) {
+      console.error('[rag] streamed generation failed, using extractive fallback:', (error as Error).message);
+      answer = '';
+      degraded = true;
+      send('restart', { reason: 'fallback' });
+    } finally {
+      if (!clientGone) {
+        void iterator.return?.(undefined as never).catch(() => undefined);
+      }
+    }
+
+    if (clientGone) return;
+    if (!answer.trim()) {
+      answer = buildExtractiveAnswer(contextChunks);
+      degraded = true;
+      send('delta', { text: answer });
+    }
+    send('done', { question, answer, retrievedNotes, sources, degraded });
+    res.end();
+  } catch (error) {
+    console.error('[rag] streaming endpoint failed:', (error as Error).message);
+    if (!clientGone) {
+      send('error', { message: 'Something went wrong while generating the answer. Please try again.' });
+      res.end();
+    }
+  }
 }
 
 /** Build the plain-language answer used in keyword-fallback mode. */
@@ -456,185 +564,4 @@ function buildKeywordAnswer(retrievedNotes: RetrievedNote[]): string {
     `Based on your notes (${retrievedNotes.map((note) => `"${note.title}"`).join(', ')}):\n\n` +
     retrievedNotes.map((note) => `• ${note.title}: ${snippet(note.content, 300)}`).join('\n\n')
   );
-}
-
-/**
- * Streaming variant of `askNotes`.
- *
- * The same retrieval pipeline runs first; the answer is then forwarded over
- * Server-Sent Events as the provider produces it, so the Ask screen shows the
- * answer typing itself instead of waiting for one whole response.
- *
- * SSE frames (each is `event: <name>` + `data: <json>`, blank-line separated):
- *   meta    { question, retrievedNotes, sources }  — retrieval finished
- *   delta   { text }                               — append to the transcript
- *   restart { reason }                             — discard partial text
- *   done    { question, answer, retrievedNotes, sources, degraded }
- *
- * Every answer follows the same meta → delta* → done shape: when the
- * generation providers are busy or unavailable the extractive/keyword
- * fallback is streamed as delta frames too, so the UI never pops a fallback
- * answer in whole while a model answer types itself out.
- *
- * The reliability guarantees of the one-shot endpoint are preserved: the
- * provider chain fails over (mid-answer failures emit `restart`), the whole
- * chain is capped by AI_GEN_DEADLINE_MS, and when no answer arrives at all
- * the extractive fallback replies from the retrieved chunks.
- */
-export async function askRagStream(
-  req: AuthenticatedRequest,
-  res: Response
-) {
-  const userId = req.user!.id;
-  const { question, topK = 3 } = req.body;
-  const collectionIds: string[] = Array.isArray(req.body.collectionIds)
-    ? req.body.collectionIds.filter(Boolean)
-    : [];
-  const noteIds: string[] = Array.isArray(req.body.noteIds)
-    ? req.body.noteIds.filter(Boolean)
-    : [];
-
-  // Headers go out first: everything after this writes SSE frames, so a
-  // thrown error can no longer become a JSON response.
-  res.status(200);
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  // Proxies must stream frames immediately instead of buffering the body.
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders?.();
-
-  const send = (event: string, data: unknown) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  };
-
-  // The user may close the tab mid-answer; stop generating right away.
-  let clientGone = false;
-  req.on('close', () => {
-    clientGone = true;
-  });
-
-  try {
-    const db = await getDatabase();
-    const retrieval = await retrieve(db, userId, question, topK, collectionIds, noteIds);
-
-    const finish = (
-      answer: string,
-      retrievedNotes: RetrievedNote[],
-      sources: AnswerSource[],
-      degraded: boolean
-    ) => {
-      send('done', { question, answer, retrievedNotes, sources, degraded });
-      res.end();
-    };
-
-    if (retrieval.mode === 'keyword') {
-      send('meta', { question, retrievedNotes: retrieval.retrievedNotes, sources: [] });
-      const answer = buildKeywordAnswer(retrieval.retrievedNotes);
-      streamAnswerInChunks(answer, send);
-      return finish(answer, retrieval.retrievedNotes, [], true);
-    }
-
-    const { contextChunks, retrievedNotes } = retrieval;
-    const sources: AnswerSource[] = contextChunks.map((chunk, index) => ({
-      index: index + 1,
-      noteId: chunk.noteId,
-      title: chunk.title,
-      collectionName: chunk.collectionName,
-      similarity: toPercent(chunk.similarity),
-      chunkContent: chunk.chunkContent,
-    }));
-
-    // Matched notes + sources are known before generation, so the UI can
-    // show them while the answer is still streaming.
-    send('meta', { question, retrievedNotes, sources });
-
-    if (contextChunks.length === 0) {
-      const answer = "I couldn't find that in your notes.";
-      streamAnswerInChunks(answer, send);
-      return finish(answer, retrievedNotes, sources, false);
-    }
-
-    const generationProvider = getGenerationProvider();
-    if (!generationProvider) {
-      const answer = buildExtractiveAnswer(contextChunks);
-      streamAnswerInChunks(answer, send);
-      return finish(answer, retrievedNotes, sources, true);
-    }
-
-    let answer = '';
-    let degraded = false;
-    // Hard cap across the whole provider chain; a slow free-tier model must
-    // never leave the connection open forever.
-    const deadline = Date.now() + aiConfig.genDeadlineMs;
-    const iterator = generationProvider.generateStream!({
-      systemInstruction: SYSTEM_INSTRUCTION,
-      prompt: `Context:\n\n${buildContext(contextChunks)}\n\nQuestion: ${question}`,
-      temperature: 0.2,
-      maxOutputTokens: 4096,
-    });
-
-    try {
-      while (!clientGone) {
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) {
-          console.warn('[rag] streamed generation hit the deadline; finalising what arrived');
-          degraded = true;
-          break;
-        }
-        // Each individual wait is bounded by whatever is left of the budget.
-        const step = await withDeadline(iterator.next(), remaining, 'generation');
-        if (step.done) break;
-
-        const event = step.value;
-        if (event.type === 'delta') {
-          answer += event.text;
-          send('delta', { text: event.text });
-        } else if (event.type === 'restart') {
-          // A provider died mid-answer; the fallback model restarts it.
-          answer = '';
-          send('restart', { reason: event.reason });
-        }
-      }
-    } catch (error) {
-      console.error('[rag] streamed generation failed:', (error as Error).message);
-      degraded = true;
-    } finally {
-      // Close the provider stream even when stopping early (deadline or the
-      // client disconnected) so the upstream request is released.
-      try {
-        await iterator.return?.(undefined as never);
-      } catch {
-        /* ignore */
-      }
-    }
-
-    if (answer.trim().length === 0) {
-      // Nothing usable arrived: the extractive fallback still answers from
-      // the retrieved chunks, so the chat never shows an empty bubble.
-      answer = buildExtractiveAnswer(contextChunks);
-      degraded = true;
-      streamAnswerInChunks(answer, send);
-    }
-
-    return finish(answer, retrievedNotes, sources, degraded);
-  } catch (error) {
-    // The SSE stream is already open, so failures are reported as a final
-    // frame instead of an HTTP error.
-    console.error('[rag] streaming endpoint failed:', (error as Error).message);
-    try {
-      const message = 'Something went wrong while generating the answer. Please try again.';
-      streamAnswerInChunks(message, send);
-      send('done', {
-        question,
-        answer: message,
-        retrievedNotes: [],
-        sources: [],
-        degraded: true,
-      });
-      res.end();
-    } catch {
-      res.end();
-    }
-  }
 }

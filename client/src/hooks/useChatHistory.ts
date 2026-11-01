@@ -37,6 +37,7 @@ export function useChatHistory() {
   const { data: chatHistory = [] } = useQuery<ChatTurn[]>({
     queryKey: chatKey,
     queryFn: async () => [],
+    initialData: [],
     staleTime: Infinity,
     gcTime: Infinity,
   });

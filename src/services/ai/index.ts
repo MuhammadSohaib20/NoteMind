@@ -13,13 +13,6 @@ export { l2Normalize } from './gemini';
 let embeddingProvider: EmbeddingProvider | null | undefined;
 let generationProvider: GenerationProvider | null | undefined;
 let cache: EmbeddingCache | undefined;
-
-/**
- * Models the boot healthcheck found unusable (retired id, exhausted quota, ...).
- * Streaming skips them so a known-bad model cannot stall the first token —
- * trying one again would only burn the open-timeout before failing over anyway.
- * Cleared only by a restart (the healthcheck re-probes every boot).
- */
 const unusableGenerationModels = new Set<string>();
 
 export function markGenerationModelUnusable(model: string): void {
@@ -101,37 +94,23 @@ class ResilientGenerationProvider implements GenerationProvider {
       : new Error('All generation providers failed');
   }
 
-  /**
-   * Streams through the same chain. Failover semantics:
-   * - A provider that dies BEFORE its first token is skipped silently.
-   * - A provider that dies MID-answer already put text on the wire, so a
-   *   `restart` event is yielded first — clients discard the partial answer
-   *   and the next provider streams a fresh one.
-   */
   async *generateStream(request: GenerationRequest): AsyncGenerator<StreamEvent> {
     let lastError: unknown;
 
     for (const provider of this.chain) {
-      // Skip models already flagged unusable (by the boot healthcheck or by an
-      // earlier stall in this run): trying one would only delay the first
-      // token before failing over anyway.
-      if (unusableGenerationModels.has(provider.model)) {
-        console.warn(
-          `[ai] skipping "${provider.name}" (${provider.model}): flagged unusable this run`
-        );
-        continue;
-      }
-      let emittedAnything = false;
+      if (unusableGenerationModels.has(provider.model)) continue;
+      let emitted = false;
       const startedAt = Date.now();
-      try {
-        const stream = provider.generateStream
-          ? provider.generateStream(request)
-          : singleDeltaStream(provider, request);
+      const stream = provider.generateStream
+        ? provider.generateStream(request)
+        : singleDeltaStream(provider, request);
 
+      try {
         for await (const event of stream) {
-          if (event.type === 'delta') emittedAnything = true;
+          if (event.type === 'delta') emitted = true;
           yield event;
         }
+        if (!emitted) throw new Error('Generation provider returned an empty streamed response');
         return;
       } catch (error) {
         lastError = error;
@@ -139,32 +118,16 @@ class ResilientGenerationProvider implements GenerationProvider {
           `[ai] streamed generation via "${provider.name}" (${provider.model}) failed: ` +
             `${(error as Error).message}`
         );
-        if (emittedAnything) {
-          yield { type: 'restart', reason: provider.name };
-        } else {
-          const burnedMs = Date.now() - startedAt;
-          // A pre-token failure that burned real waiting time is a stall, not
-          // a transient blip: skip this model for the rest of the run so every
-          // later ask does not pay the wait again. Fast failures (<5s) are
-          // left alone — they may be transient and cost almost nothing.
-          if (burnedMs >= 5000) {
-            markGenerationModelUnusable(provider.model);
-            console.warn(
-              `[ai] "${provider.model}" stalled ${burnedMs}ms before the first token; ` +
-                `skipping it for the rest of this run`
-            );
-          }
-        }
+        if (emitted) yield { type: 'restart', reason: provider.name };
+        const elapsed = Date.now() - startedAt;
+        if (!emitted && elapsed >= 5000) markGenerationModelUnusable(provider.model);
       }
     }
 
-    throw lastError instanceof Error
-      ? lastError
-      : new Error('All generation providers failed');
+    throw lastError instanceof Error ? lastError : new Error('All generation providers failed');
   }
 }
 
-/** Wraps a non-streaming provider as a single-delta stream. */
 async function* singleDeltaStream(
   provider: GenerationProvider,
   request: GenerationRequest

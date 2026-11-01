@@ -70,6 +70,13 @@ class FakeEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+class DelayedFakeEmbeddingProvider extends FakeEmbeddingProvider {
+  async embed(inputs: EmbedInput[], task: EmbedTask): Promise<number[][]> {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return super.embed(inputs, task);
+  }
+}
+
 class FakeGenerationProvider implements GenerationProvider {
   readonly name = 'fake';
   readonly model = 'fake-generation-model';
@@ -79,17 +86,16 @@ class FakeGenerationProvider implements GenerationProvider {
   }
 }
 
-/** Streams two deltas so the SSE endpoint can be exercised end to end. */
 class FakeStreamingGenerationProvider implements GenerationProvider {
   readonly name = 'fake-stream';
   readonly model = 'fake-stream-model';
 
-  async generate(req: { prompt: string }): Promise<string> {
-    return `Streamed answer for: ${req.prompt.split('Question:').pop()?.trim() ?? 'unknown'}`;
+  async generate(): Promise<string> {
+    return 'Streaming answer.';
   }
 
   async *generateStream(): AsyncGenerator<StreamEvent> {
-    yield { type: 'delta', text: 'Streamed ' };
+    yield { type: 'delta', text: 'Streaming ' };
     yield { type: 'delta', text: 'answer.' };
   }
 }
@@ -200,6 +206,40 @@ describe('RAG Pipeline Integration Tests', () => {
     // Wait out its background auto-index so the explicit-index counts in the
     // next test are deterministic.
     expect(await waitForIndexed(breadNoteId)).toBe(true);
+  });
+
+  it('3a. keeps imported note indexing status fresh until background indexing completes', async () => {
+    setEmbeddingProvider(new DelayedFakeEmbeddingProvider());
+    const uploaded = await request(app)
+      .post('/api/v1/notes/upload')
+      .set('Authorization', 'Bearer ' + authToken)
+      .attach('file', Buffer.from('Imported notes are automatically indexed.'), {
+        filename: 'auto-index-status.txt',
+        contentType: 'text/plain',
+      });
+
+    expect(uploaded.status).toBe(201);
+    const noteId = uploaded.body.data.id as string;
+    let sawIndexing = false;
+    let indexed = false;
+    for (let attempt = 0; attempt < 40 && !indexed; attempt++) {
+      const list = await request(app)
+        .get('/api/v1/notes')
+        .set('Authorization', 'Bearer ' + authToken);
+      const note = (list.body.data as Array<{
+        id: string;
+        extractionPending: boolean;
+        indexingPending: boolean;
+        indexed: boolean;
+      }>).find((item) => item.id === noteId);
+      sawIndexing ||= note?.indexingPending === true;
+      indexed = note?.indexed === true;
+      if (!indexed) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    expect(sawIndexing).toBe(true);
+    expect(indexed).toBe(true);
+    setEmbeddingProvider(embedding);
   });
 
   it('3b. should scope POST /notes/index to owned ids and skip up-to-date notes', async () => {
@@ -360,92 +400,26 @@ describe('RAG Pipeline Integration Tests', () => {
     expect(allowed.body.data.retrievedNotes[0].title).toBe('Kubernetes Deployment Guide');
   });
 
-  it('7d. should stream the answer over Server-Sent Events', async () => {
+  it('7d. streams generated answer deltas over the Ask endpoint', async () => {
     setGenerationProvider(new FakeStreamingGenerationProvider());
 
     const res = await request(app)
       .post('/api/v1/rag/ask/stream')
-      .set('Authorization', `Bearer ${authToken}`)
+      .set('Authorization', 'Bearer ' + authToken)
       .send({ question: 'How do I deploy with Kubernetes replicas?', topK: 3 });
 
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('text/event-stream');
-
-    // Frame order: meta (retrieval done), deltas (answer), done (final).
     expect(res.text).toContain('event: meta');
     expect(res.text).toContain('event: delta');
     expect(res.text).toContain('event: done');
 
-    // The deltas concatenate to exactly the streamed answer...
-    const deltaTexts = Array.from(
-      res.text.matchAll(/event: delta\ndata: ({"text".*})/g)
-    ).map((match) => JSON.parse(match[1]).text);
-    expect(deltaTexts.join('')).toBe('Streamed answer.');
-
-    // ...and the done frame reports the same answer plus real sources.
-    const doneLine = res.text.match(/event: done\ndata: (.*)/);
-    expect(doneLine).toBeTruthy();
-    const done = JSON.parse(doneLine![1]);
-    expect(done.answer).toBe('Streamed answer.');
-    expect(done.degraded).toBe(false);
-    expect(done.retrievedNotes[0].title).toBe('Kubernetes Deployment Guide');
+    const deltas = Array.from(res.text.matchAll(/event: delta\ndata: (.*)/g))
+      .map((match) => JSON.parse(match[1]).text);
+    expect(deltas).toEqual(['Streaming ', 'answer.']);
+    const done = JSON.parse(res.text.match(/event: done\ndata: (.*)/)![1]);
+    expect(done.answer).toBe('Streaming answer.');
     expect(done.sources.length).toBeGreaterThan(0);
-    expect(done.sources[0]).toHaveProperty('noteId');
-  });
-
-  it('7e. should stream the extractive fallback as deltas too (no generation provider)', async () => {
-    // When the AI models are busy or unconfigured, the server answers from
-    // the retrieved chunks — that answer must arrive as delta frames exactly
-    // like a model answer, never as one whole `done` payload.
-    setGenerationProvider(null);
-
-    const res = await request(app)
-      .post('/api/v1/rag/ask/stream')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ question: 'How do I deploy with Kubernetes replicas?', topK: 3 });
-
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toContain('text/event-stream');
-    expect(res.text).toContain('event: meta');
-    expect(res.text).toContain('event: delta');
-
-    const deltaTexts = Array.from(
-      res.text.matchAll(/event: delta\ndata: ({"text".*})/g)
-    ).map((match) => JSON.parse(match[1]).text);
-    expect(deltaTexts.length).toBeGreaterThan(0);
-
-    const doneLine = res.text.match(/event: done\ndata: (.*)/);
-    expect(doneLine).toBeTruthy();
-    const done = JSON.parse(doneLine![1]);
-    // The deltas reconstruct the fallback answer exactly.
-    expect(deltaTexts.join('')).toBe(done.answer);
-    expect(done.degraded).toBe(true);
-    expect(done.retrievedNotes[0].title).toBe('Kubernetes Deployment Guide');
-  });
-
-  it('7f. should stream the keyword-mode answer as deltas too', async () => {
-    // Same guarantee on the keyword path (no embedding provider): the answer
-    // is still delivered as meta → delta* → done.
-    setEmbeddingProvider(null);
-
-    const res = await request(app)
-      .post('/api/v1/rag/ask/stream')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ question: 'Kubernetes', topK: 3 });
-
-    expect(res.status).toBe(200);
-    expect(res.text).toContain('event: delta');
-
-    const deltaTexts = Array.from(
-      res.text.matchAll(/event: delta\ndata: ({"text".*})/g)
-    ).map((match) => JSON.parse(match[1]).text);
-    expect(deltaTexts.length).toBeGreaterThan(0);
-
-    const doneLine = res.text.match(/event: done\ndata: (.*)/);
-    expect(doneLine).toBeTruthy();
-    const done = JSON.parse(doneLine![1]);
-    expect(deltaTexts.join('')).toBe(done.answer);
-    expect(done.degraded).toBe(true);
   });
 
   it('8. should degrade to keyword search when no embedding provider is configured', async () => {

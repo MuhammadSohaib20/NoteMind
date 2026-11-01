@@ -3,12 +3,6 @@ import { aiConfig } from '../../config/ai';
 import { RateLimiter, withRetry, withDeadline } from './http';
 import { EmbedInput, EmbedTask, GenerationProvider, GenerationRequest, EmbeddingProvider, StreamEvent } from './types';
 
-/**
- * Bounded time to OPEN a stream. The SDK's own httpOptions.timeout (60s)
- * covers the whole response, but a stalled model must not hold the provider
- * chain — and with it the request's generation deadline — hostage: one fast
- * attempt here, then the resilient chain skips to the next provider.
- */
 const STREAM_OPEN_TIMEOUT_MS = 20000;
 
 /** L2 normalises a vector so cosine distance is computed on direction only. */
@@ -226,16 +220,6 @@ export class GeminiGenerationProvider implements GenerationProvider {
     return text.trim();
   }
 
-  /**
-   * Streams the answer chunk by chunk via the SDK's generateContentStream.
-   *
-   * The OPEN is a single attempt bounded by STREAM_OPEN_TIMEOUT_MS: a stalled
-   * model must not burn the whole chain deadline on retries (3 x
-   * AI_GEN_TIMEOUT_MS would be three minutes), and the resilient chain already
-   * provides the failover — it skips to the next provider when this throws. A
-   * failure MID-answer is not retried here either; the chain restarts the
-   * answer with the fallback model instead.
-   */
   async *generateStream(request: GenerationRequest): AsyncGenerator<StreamEvent> {
     const config: Record<string, unknown> = {
       temperature: request.temperature ?? 0.2,
@@ -243,29 +227,18 @@ export class GeminiGenerationProvider implements GenerationProvider {
       systemInstruction: request.systemInstruction,
       httpOptions: this.httpOptions,
     };
-
-    if (request.json) {
-      config.responseMimeType = 'application/json';
-    }
+    if (request.json) config.responseMimeType = 'application/json';
 
     await this.limiter.acquire();
-    let stream: AsyncGenerator<any>;
-    try {
-      stream = await withDeadline(
-        this.client.models.generateContentStream({
-          model: this.model,
-          contents: request.prompt,
-          config: config as any,
-        }),
-        STREAM_OPEN_TIMEOUT_MS,
-        'gemini stream open'
-      );
-    } catch (error) {
-      console.warn(
-        `[ai] gemini stream open failed for "${this.model}": ${(error as Error).message}`
-      );
-      throw error;
-    }
+    const stream = await withDeadline(
+      this.client.models.generateContentStream({
+        model: this.model,
+        contents: request.prompt,
+        config: config as any,
+      }),
+      STREAM_OPEN_TIMEOUT_MS,
+      `gemini stream open (${this.model})`
+    );
 
     let emitted = false;
     for await (const chunk of stream) {
@@ -275,9 +248,6 @@ export class GeminiGenerationProvider implements GenerationProvider {
         yield { type: 'delta', text };
       }
     }
-
-    if (!emitted) {
-      throw new Error('Generation provider returned an empty streamed response');
-    }
+    if (!emitted) throw new Error('Generation provider returned an empty streamed response');
   }
 }
