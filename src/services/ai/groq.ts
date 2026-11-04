@@ -1,6 +1,6 @@
 import { aiConfig } from '../../config/ai';
 import { RateLimiter, withRetry } from './http';
-import { GenerationProvider, GenerationRequest } from './types';
+import { GenerationProvider, GenerationRequest, StreamEvent } from './types';
 
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
 
@@ -83,5 +83,73 @@ export class GroqGenerationProvider implements GenerationProvider {
       throw new Error('Groq returned an empty response');
     }
     return text.trim();
+  }
+
+  async *generateStream(request: GenerationRequest): AsyncGenerator<StreamEvent> {
+    const messages: Array<{ role: string; content: string }> = [];
+    if (request.systemInstruction) {
+      messages.push({ role: 'system', content: request.systemInstruction });
+    }
+    messages.push({ role: 'user', content: request.prompt });
+
+    const body: Record<string, unknown> = {
+      model: this.model,
+      messages,
+      temperature: request.temperature ?? 0.2,
+      max_tokens: request.maxOutputTokens ?? 2048,
+      stream: true,
+    };
+    if (request.json) body.response_format = { type: 'json_object' };
+
+    await this.limiter.acquire();
+    const response = await fetch(`${GROQ_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(aiConfig.genTimeoutMs),
+    });
+
+    if (!response.ok || !response.body) {
+      const errorText = await response.text().catch(() => '');
+      throw new Error(`Groq streaming request failed (${response.status}): ${errorText.slice(0, 300)}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let emitted = false;
+    let streamEnded = false;
+    try {
+      while (!streamEnded) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let newlineAt: number;
+        while ((newlineAt = buffer.indexOf('\n')) !== -1) {
+          const line = buffer.slice(0, newlineAt).trim();
+          buffer = buffer.slice(newlineAt + 1);
+          if (!line.startsWith('data:')) continue;
+          const data = line.slice(5).trim();
+          if (data === '[DONE]') {
+            streamEnded = true;
+            break;
+          }
+
+          const payload = JSON.parse(data);
+          const text = payload?.choices?.[0]?.delta?.content;
+          if (typeof text === 'string' && text.length > 0) {
+            emitted = true;
+            yield { type: 'delta', text };
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (!emitted) throw new Error('Groq returned an empty streamed response');
   }
 }

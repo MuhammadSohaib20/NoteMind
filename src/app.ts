@@ -20,9 +20,15 @@ export function createApp(): Express {
   app.use(express.json());
   app.use(structuredLogger);
 
-  // Health check
+  // Health check. `startedAt` is the boot timestamp: the client polls it and
+  // reloads when it changes, so a page can never keep running code that
+  // predates a server restart (the dev workflow restarts the server to pick
+  // up updates — an already-open tab must follow).
+  const SERVER_STARTED_AT = Date.now();
   app.get('/health', (req: Request, res: Response) => {
-    res.status(200).json({ status: 'ok', service: 'NoteMind API', timestamp: new Date().toISOString() });
+    res
+      .status(200)
+      .json({ status: 'ok', service: 'NoteMind API', timestamp: new Date().toISOString(), startedAt: SERVER_STARTED_AT });
   });
 
   // API Routes (v1) with rate limiting

@@ -1,7 +1,9 @@
 import { GoogleGenAI } from '@google/genai';
 import { aiConfig } from '../../config/ai';
-import { RateLimiter, withRetry } from './http';
-import { EmbedInput, EmbedTask, GenerationProvider, GenerationRequest, EmbeddingProvider } from './types';
+import { RateLimiter, withRetry, withDeadline } from './http';
+import { EmbedInput, EmbedTask, GenerationProvider, GenerationRequest, EmbeddingProvider, StreamEvent } from './types';
+
+const STREAM_OPEN_TIMEOUT_MS = 20000;
 
 /** L2 normalises a vector so cosine distance is computed on direction only. */
 export function l2Normalize(vector: number[]): number[] {
@@ -216,5 +218,36 @@ export class GeminiGenerationProvider implements GenerationProvider {
       throw new Error('Generation provider returned an empty response');
     }
     return text.trim();
+  }
+
+  async *generateStream(request: GenerationRequest): AsyncGenerator<StreamEvent> {
+    const config: Record<string, unknown> = {
+      temperature: request.temperature ?? 0.2,
+      maxOutputTokens: request.maxOutputTokens ?? 2048,
+      systemInstruction: request.systemInstruction,
+      httpOptions: this.httpOptions,
+    };
+    if (request.json) config.responseMimeType = 'application/json';
+
+    await this.limiter.acquire();
+    const stream = await withDeadline(
+      this.client.models.generateContentStream({
+        model: this.model,
+        contents: request.prompt,
+        config: config as any,
+      }),
+      STREAM_OPEN_TIMEOUT_MS,
+      `gemini stream open (${this.model})`
+    );
+
+    let emitted = false;
+    for await (const chunk of stream) {
+      const text = chunk?.text;
+      if (text) {
+        emitted = true;
+        yield { type: 'delta', text };
+      }
+    }
+    if (!emitted) throw new Error('Generation provider returned an empty streamed response');
   }
 }

@@ -23,6 +23,12 @@ export function useNotes(collectionId?: string, tag?: string, search?: string) {
       return res.data || [];
     },
     enabled: !!user?.id,
+    // Keep imported note content and its auto-index status fresh while
+    // extraction or background embedding is running.
+    refetchInterval: (query) => {
+      const data = query.state.data as Note[] | undefined;
+      return data?.some((note) => note.extractionPending || note.indexingPending) ? 1500 : false;
+    },
   });
 
   const trashQuery = useQuery({

@@ -7,7 +7,7 @@ import {
   setGenerationProvider,
   clearEmbeddingCache,
 } from '../../src/services/ai';
-import { EmbeddingProvider, GenerationProvider, EmbedInput, EmbedTask } from '../../src/services/ai/types';
+import { EmbeddingProvider, GenerationProvider, EmbedInput, EmbedTask, StreamEvent } from '../../src/services/ai/types';
 
 /**
  * Integration tests for the RAG pipeline.
@@ -70,12 +70,33 @@ class FakeEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+class DelayedFakeEmbeddingProvider extends FakeEmbeddingProvider {
+  async embed(inputs: EmbedInput[], task: EmbedTask): Promise<number[][]> {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return super.embed(inputs, task);
+  }
+}
+
 class FakeGenerationProvider implements GenerationProvider {
   readonly name = 'fake';
   readonly model = 'fake-generation-model';
 
   async generate(req: { prompt: string }): Promise<string> {
     return `Generated answer for: ${req.prompt.split('Question:').pop()?.trim() ?? 'unknown'}`;
+  }
+}
+
+class FakeStreamingGenerationProvider implements GenerationProvider {
+  readonly name = 'fake-stream';
+  readonly model = 'fake-stream-model';
+
+  async generate(): Promise<string> {
+    return 'Streaming answer.';
+  }
+
+  async *generateStream(): AsyncGenerator<StreamEvent> {
+    yield { type: 'delta', text: 'Streaming ' };
+    yield { type: 'delta', text: 'answer.' };
   }
 }
 
@@ -102,6 +123,18 @@ describe('RAG Pipeline Integration Tests', () => {
     setGenerationProvider(null);
   });
 
+  /** Polls GET /notes/:id until the background auto-index has landed. */
+  const waitForIndexed = async (noteId: string): Promise<boolean> => {
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const check = await request(app)
+        .get(`/api/v1/notes/${noteId}`)
+        .set('Authorization', `Bearer ${authToken}`);
+      if (check.body.data?.indexed === true) return true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  };
+
   it('1. should register a user for RAG testing', async () => {
     const res = await request(app)
       .post('/api/v1/auth/signup')
@@ -112,7 +145,7 @@ describe('RAG Pipeline Integration Tests', () => {
     userId = res.body.data.user.id;
   });
 
-  it('2. should create a note (indexing is now explicit, so it stays unindexed)', async () => {
+  it('2. should create a note and auto-index it in the background (no manual step)', async () => {
     const res = await request(app)
       .post('/api/v1/notes')
       .set('Authorization', `Bearer ${authToken}`)
@@ -127,8 +160,33 @@ describe('RAG Pipeline Integration Tests', () => {
     expect(res.status).toBe(201);
     expect(res.body.data.id).toBeDefined();
     kubernetesNoteId = res.body.data.id;
-    // Notes are only embedded via the explicit index endpoint.
+    // The response is sent before the background embed lands...
     expect(res.body.data.indexed).toBe(false);
+
+    // ...and the note becomes indexed on its own, without POST /notes/index.
+    expect(await waitForIndexed(kubernetesNoteId)).toBe(true);
+  });
+
+  it('2b. should self-heal a leftover unindexed note on the next list load', async () => {
+    // Simulate a note that predates auto-indexing: drop its embeddings behind
+    // the app's back.
+    const db = await getDatabase();
+    await db.query('DELETE FROM "note_embeddings" WHERE note_id = $1;', [kubernetesNoteId]);
+
+    // Loading the notes list schedules the re-embed in the background; the
+    // flag flips once it lands — with no manual indexing step.
+    let healed = false;
+    for (let attempt = 0; attempt < 30 && !healed; attempt++) {
+      const list = await request(app)
+        .get('/api/v1/notes')
+        .set('Authorization', `Bearer ${authToken}`);
+      const note = (list.body.data as Array<{ id: string; indexed: boolean }>).find(
+        (n) => n.id === kubernetesNoteId
+      );
+      healed = note?.indexed === true;
+      if (!healed) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    expect(healed).toBe(true);
   });
 
   it('3. should create a second, unrelated note', async () => {
@@ -145,18 +203,57 @@ describe('RAG Pipeline Integration Tests', () => {
 
     expect(res.status).toBe(201);
     breadNoteId = res.body.data.id;
+    // Wait out its background auto-index so the explicit-index counts in the
+    // next test are deterministic.
+    expect(await waitForIndexed(breadNoteId)).toBe(true);
   });
 
-  it('3b. should only embed notes selected through POST /notes/index', async () => {
+  it('3a. keeps imported note indexing status fresh until background indexing completes', async () => {
+    setEmbeddingProvider(new DelayedFakeEmbeddingProvider());
+    const uploaded = await request(app)
+      .post('/api/v1/notes/upload')
+      .set('Authorization', 'Bearer ' + authToken)
+      .attach('file', Buffer.from('Imported notes are automatically indexed.'), {
+        filename: 'auto-index-status.txt',
+        contentType: 'text/plain',
+      });
+
+    expect(uploaded.status).toBe(201);
+    const noteId = uploaded.body.data.id as string;
+    let sawIndexing = false;
+    let indexed = false;
+    for (let attempt = 0; attempt < 40 && !indexed; attempt++) {
+      const list = await request(app)
+        .get('/api/v1/notes')
+        .set('Authorization', 'Bearer ' + authToken);
+      const note = (list.body.data as Array<{
+        id: string;
+        extractionPending: boolean;
+        indexingPending: boolean;
+        indexed: boolean;
+      }>).find((item) => item.id === noteId);
+      sawIndexing ||= note?.indexingPending === true;
+      indexed = note?.indexed === true;
+      if (!indexed) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    expect(sawIndexing).toBe(true);
+    expect(indexed).toBe(true);
+    setEmbeddingProvider(embedding);
+  });
+
+  it('3b. should scope POST /notes/index to owned ids and skip up-to-date notes', async () => {
     const typecheck = await request(app)
       .post('/api/v1/notes/index')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ noteIds: [kubernetesNoteId, '11111111-2222-3333-4444-555555555555'] });
 
     expect(typecheck.status).toBe(200);
-    expect(typecheck.body.data.summary.indexed).toBe(1);
+    // The Kubernetes note was already auto-indexed on create, so the explicit
+    // call skips it as up to date; only the unknown id fails.
+    expect(typecheck.body.data.summary.upToDate).toBe(1);
     expect(typecheck.body.data.summary.failed).toBe(1);
-    expect(typecheck.body.data.results[0].status).toBe('indexed');
+    expect(typecheck.body.data.results[0].status).toBe('up_to_date');
     expect(typecheck.body.data.results[1].status).toBe('not_found');
 
     const res = await request(app)
@@ -166,10 +263,10 @@ describe('RAG Pipeline Integration Tests', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.data.summary.requested).toBe(2);
-    // The Kubernetes note was embedded in the previous call: it must be
-    // skipped without touching the provider.
-    expect(res.body.data.summary.indexed).toBe(1);
-    expect(res.body.data.summary.upToDate).toBe(1);
+    // Both notes were embedded automatically on create: the explicit call
+    // must skip them without touching the provider.
+    expect(res.body.data.summary.indexed).toBe(0);
+    expect(res.body.data.summary.upToDate).toBe(2);
 
     const callsAfterFirstIndex = embedding.embedCallCount;
 
@@ -301,6 +398,28 @@ describe('RAG Pipeline Integration Tests', () => {
     expect(allowed.status).toBe(200);
     expect(allowed.body.data.retrievedNotes.length).toBeGreaterThan(0);
     expect(allowed.body.data.retrievedNotes[0].title).toBe('Kubernetes Deployment Guide');
+  });
+
+  it('7d. streams generated answer deltas over the Ask endpoint', async () => {
+    setGenerationProvider(new FakeStreamingGenerationProvider());
+
+    const res = await request(app)
+      .post('/api/v1/rag/ask/stream')
+      .set('Authorization', 'Bearer ' + authToken)
+      .send({ question: 'How do I deploy with Kubernetes replicas?', topK: 3 });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    expect(res.text).toContain('event: meta');
+    expect(res.text).toContain('event: delta');
+    expect(res.text).toContain('event: done');
+
+    const deltas = Array.from(res.text.matchAll(/event: delta\ndata: (.*)/g))
+      .map((match) => JSON.parse(match[1]).text);
+    expect(deltas).toEqual(['Streaming ', 'answer.']);
+    const done = JSON.parse(res.text.match(/event: done\ndata: (.*)/)![1]);
+    expect(done.answer).toBe('Streaming answer.');
+    expect(done.sources.length).toBeGreaterThan(0);
   });
 
   it('8. should degrade to keyword search when no embedding provider is configured', async () => {

@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { aiConfig } from '../../config/ai';
+import { withDeadline } from './http';
 
 /**
  * Boot-time verification of the configured model ids.
@@ -48,17 +49,24 @@ export async function verifyAiConfiguration(): Promise<void> {
     if (!model) continue;
 
     try {
-      await client.models.generateContent({
-        model,
-        contents: '.',
-        config: { maxOutputTokens: 8 },
-      });
+      const response = await withDeadline(
+        client.models.generateContent({
+          model,
+          contents: '.',
+          config: { maxOutputTokens: 8 },
+        }),
+        10_000,
+        `generation probe for "${model}"`
+      );
+      if (!response.text?.trim()) {
+        throw new Error('Generation model returned an empty response');
+      }
       console.log(`[ai] generation  OK  ${model}`);
     } catch (error) {
       console.warn(`[ai] generation model "${model}" is NOT usable: ${(error as Error).message}`);
       console.warn(
         `[ai]   -> If it was retired, change AI_GEN_MODEL (or AI_GEN_FALLBACK_MODEL) in .env. ` +
-          `Requests to it will otherwise fall back to the next model in the chain.`
+          `The provider chain will try the next configured model.`
       );
     }
   }

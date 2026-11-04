@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brain,
   Send,
@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { useRag } from '../hooks/useRag';
 import { useNotes } from '../hooks/useNotes';
+import { useChatHistory, ChatTurn } from '../hooks/useChatHistory';
 import { useAuth } from '../context/AuthContext';
 import { Note, Collection } from '../types';
 import { MarkdownContent } from './MarkdownContent';
@@ -20,21 +21,9 @@ interface RagViewProps {
   onSelectNote: (note: Note) => void;
 }
 
-interface ChatTurn {
-  question: string;
-  answer: string;
-  sources: {
-    id?: string;
-    title: string;
-    content: string;
-    collectionName?: string;
-    tags?: string[];
-    similarity: number;
-  }[];
-}
-
 /** POST /notes/index accepts at most 50 ids per request. */
 const INDEX_BATCH_SIZE = 50;
+const ANSWER_REVEAL_INTERVAL_MS = 20;
 
 export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNote }) => {
   const { user } = useAuth();
@@ -42,8 +31,61 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
   const { indexNotes } = useNotes();
 
   const [question, setQuestion] = useState('');
-  const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
+  // The conversation is kept in the react-query cache (see useChatHistory), so
+  // it survives navigation between pages and is only cleared on logout.
+  const { chatHistory, setChatHistory } = useChatHistory();
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  const [streaming, setStreaming] = useState<{
+    question: string;
+    answer: string;
+    sources: ChatTurn['sources'];
+    notice?: string;
+  } | null>(null);
+  const pendingAnswerRef = useRef('');
+  const visibleCharacterCountRef = useRef(0);
+  const revealCompleteRef = useRef<(() => void) | null>(null);
+  const askInFlightRef = useRef(false);
+  const awaitingRestartedAnswerRef = useRef(false);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, [streaming?.answer, streaming?.question, chatHistory.length]);
+
+  useEffect(() => {
+    if (!streaming) return;
+
+    const timer = window.setInterval(() => {
+      const characters = Array.from(pendingAnswerRef.current);
+      if (visibleCharacterCountRef.current < characters.length) {
+        visibleCharacterCountRef.current += 1;
+        const answer = characters.slice(0, visibleCharacterCountRef.current).join('');
+        setStreaming((current) => (current ? { ...current, answer } : current));
+      }
+
+      if (visibleCharacterCountRef.current >= characters.length) {
+        revealCompleteRef.current?.();
+        revealCompleteRef.current = null;
+      }
+    }, ANSWER_REVEAL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+      revealCompleteRef.current?.();
+      revealCompleteRef.current = null;
+    };
+  }, [Boolean(streaming)]);
+
+  const waitForAnswerReveal = () =>
+    new Promise<void>((resolve) => {
+      if (visibleCharacterCountRef.current >= Array.from(pendingAnswerRef.current).length) {
+        resolve();
+      } else {
+        revealCompleteRef.current = resolve;
+      }
+    });
 
   // AI Index panel state. The selection is intentionally NOT persisted: every
   // visit starts fresh, so the assistant only ever analyses the notes the
@@ -165,23 +207,67 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
 
   const submitQuestion = async (qText: string) => {
     const trimmed = qText.trim();
-    if (!trimmed) return;
+    if (!trimmed || askInFlightRef.current) return;
+    askInFlightRef.current = true;
     setQuestion('');
+    pendingAnswerRef.current = '';
+    visibleCharacterCountRef.current = 0;
+    awaitingRestartedAnswerRef.current = false;
+    setStreaming({ question: trimmed, answer: '', sources: [] });
 
     try {
-      const res = await askRag({ question: trimmed, topK: 4, noteIds: scopedNoteIds });
-      if (res) {
-        setChatHistory((prev) => [
-          ...prev,
-          {
-            question: trimmed,
-            answer: res.answer,
-            sources: res.retrievedNotes || [],
-          },
-        ]);
-      }
+      const res = await askRag({
+        question: trimmed,
+        topK: 4,
+        noteIds: scopedNoteIds,
+        onMeta: (meta) => {
+          setStreaming((current) =>
+            current
+              ? {
+                  ...current,
+                  sources: meta.retrievedNotes,
+                }
+              : current
+          );
+        },
+        onDelta: (answer) => {
+          if (awaitingRestartedAnswerRef.current) {
+            awaitingRestartedAnswerRef.current = false;
+            setStreaming((current) =>
+              current ? { ...current, answer: '', notice: undefined } : current
+            );
+          }
+          pendingAnswerRef.current = answer;
+        },
+        onRestart: () => {
+          // Keep the partial response on screen until the replacement stream
+          // starts, then reveal the replacement from its own first character.
+          pendingAnswerRef.current = '';
+          visibleCharacterCountRef.current = 0;
+          awaitingRestartedAnswerRef.current = true;
+          setStreaming((current) =>
+            current
+              ? { ...current, notice: 'Reconnecting to another AI model…' }
+              : current
+          );
+        },
+      });
+
+      pendingAnswerRef.current = res.answer;
+      await waitForAnswerReveal();
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          question: trimmed,
+          answer: res.answer,
+          sources: res.retrievedNotes || [],
+        },
+      ]);
     } catch {
-      // handled by error state
+      // The mutation error is shown below the chat.
+    } finally {
+      setStreaming(null);
+      askInFlightRef.current = false;
     }
   };
 
@@ -219,6 +305,37 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
     'Find information about my project ideas',
   ];
 
+  // Matched notes shown with each completed answer.
+  const renderSourceGrid = (sources: ChatTurn['sources']) => (
+    <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
+      <span className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+        Matched Notes ({sources.length})
+      </span>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        {sources.map((src, sIdx) => (
+          <div
+            key={sIdx}
+            onClick={() => handleOpenSourceNote(src.id, src.title)}
+            className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/80 hover:bg-blue-50/60 dark:hover:bg-blue-950/60 border border-slate-200/80 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-500 cursor-pointer transition"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate flex items-center gap-1.5">
+                <FileText className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                {src.title}
+              </span>
+              <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
+                {src.similarity}%
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2 mt-1">
+              {src.content}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
   return (
     <div className="flex-1 min-h-0 bg-[#F8FAFC] dark:bg-[#0F172A] flex flex-col h-full overflow-hidden transition-colors">
 
@@ -228,8 +345,8 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
         <div className="flex-1 min-w-0 flex flex-col p-3 sm:p-5 overflow-hidden">
           <div className="flex-1 bg-slate-100/70 dark:bg-slate-950/50 border border-slate-200/80 dark:border-slate-800 rounded-2xl flex flex-col overflow-hidden">
             {/* Scrollable Messages / Welcome View */}
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
-              {chatHistory.length === 0 && !isAsking ? (
+            <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
+              {chatHistory.length === 0 && !isAsking && !streaming ? (
                 <div className="h-full flex flex-col items-center justify-center text-center max-w-lg mx-auto py-8">
                   <div className="w-14 h-14 rounded-2xl bg-indigo-100 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center mb-4 shadow-xs">
                     <Brain className="w-8 h-8" />
@@ -247,6 +364,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                         key={idx}
                         type="button"
                         onClick={() => submitQuestion(prompt)}
+                        disabled={isAsking}
                         className="px-4 py-2 bg-white dark:bg-slate-900 hover:bg-blue-50 dark:hover:bg-blue-950/50 text-blue-600 dark:text-blue-400 border border-blue-200/80 dark:border-blue-800/80 rounded-xl text-xs font-medium shadow-2xs transition flex items-center gap-2"
                       >
                         <Sparkles className="w-3.5 h-3.5 text-blue-500 dark:text-blue-400 shrink-0" />
@@ -295,40 +413,48 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                         <MarkdownContent text={turn.answer} />
 
                         {/* Source Citations */}
-                        {turn.sources.length > 0 && (
-                          <div className="pt-3 border-t border-slate-100 dark:border-slate-800 space-y-2">
-                            <span className="text-[11px] font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
-                              Matched Notes ({turn.sources.length})
-                            </span>
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                              {turn.sources.map((src, sIdx) => (
-                                <div
-                                  key={sIdx}
-                                  onClick={() => handleOpenSourceNote(src.id, src.title)}
-                                  className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/80 hover:bg-blue-50/60 dark:hover:bg-blue-950/60 border border-slate-200/80 dark:border-slate-700 hover:border-blue-300 dark:hover:border-blue-500 cursor-pointer transition"
-                                >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate flex items-center gap-1.5">
-                                      <FileText className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
-                                      {src.title}
-                                    </span>
-                                    <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
-                                      {src.similarity}%
-                                    </span>
-                                  </div>
-                                  <p className="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2 mt-1">
-                                    {src.content}
-                                  </p>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
+                        {turn.sources.length > 0 && renderSourceGrid(turn.sources)}
                       </div>
                     </div>
                   ))}
 
-                  {isAsking && (
+                  {streaming && (
+                    <div className="space-y-3">
+                      <div className="flex justify-end">
+                        <div className="bg-blue-600 text-white text-xs sm:text-sm font-medium px-4 py-2.5 rounded-2xl rounded-tr-xs max-w-md shadow-xs">
+                          {streaming.question}
+                        </div>
+                      </div>
+                      <div className="bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-2xl p-5 shadow-xs space-y-4">
+                        <div className="flex items-center gap-2 text-xs font-bold text-blue-600 dark:text-blue-400">
+                          <Brain className="w-4 h-4" />
+                          <span>NoteMind AI</span>
+                          <span className="inline-flex items-center gap-1.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                            {streaming.answer ? 'responding' : 'thinking'}
+                          </span>
+                        </div>
+                        {streaming.notice && (
+                          <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                            {streaming.notice} Your answer will stay visible while it retries.
+                          </p>
+                        )}
+                        {streaming.answer ? (
+                          <div>
+                            <MarkdownContent text={streaming.answer} />
+                            <span className="inline-block w-2 h-4 bg-blue-600/70 animate-pulse ml-0.5 align-middle" />
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-500 dark:text-slate-400 animate-pulse">
+                            Searching your notes and preparing an answer…
+                          </p>
+                        )}
+                        {streaming.sources.length > 0 && renderSourceGrid(streaming.sources)}
+                      </div>
+                    </div>
+                  )}
+
+                  {isAsking && !streaming && (
                     <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 flex items-center gap-3 text-xs text-slate-600 dark:text-slate-300 shadow-xs">
                       <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
                       <span>
@@ -447,7 +573,7 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
               </p>
             ) : (
               listedNotes.map((note) => {
-                const isIndexingNow = indexingIds.has(note.id);
+                const isIndexingNow = indexingIds.has(note.id) || note.indexingPending;
                 return (
                   <label
                     key={note.id}
@@ -464,7 +590,9 @@ export const RagView: React.FC<RagViewProps> = ({ notes, collections, onSelectNo
                         {note.title}
                       </span>
                       <span className="mt-0.5 flex items-center gap-1 text-[10px]">
-                        {isIndexingNow ? (
+                        {note.extractionPending ? (
+                          <span className="text-violet-600 dark:text-violet-400 font-semibold">Extracting...</span>
+                        ) : isIndexingNow ? (
                           <>
                             <span className="w-2.5 h-2.5 border-[1.5px] border-violet-500 border-t-transparent rounded-full animate-spin" />
                             <span className="text-violet-600 dark:text-violet-400 font-semibold">Indexing...</span>

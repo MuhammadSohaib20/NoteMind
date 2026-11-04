@@ -205,6 +205,119 @@ async function keywordSearch(
   return scored.slice(0, topK);
 }
 
+/**
+ * Embeds the question, runs vector search, then keeps the strongest chunks
+ * of each matching note for the one-shot answer endpoint.
+ *
+ * Returns `mode: 'keyword'` when no embedding provider is configured so the
+ * endpoint keeps working before an API key is added.
+ */
+async function retrieve(
+  db: any,
+  userId: string,
+  question: string,
+  topK: number,
+  collectionIds: string[],
+  noteIds: string[]
+): Promise<{ mode: 'keyword' | 'vector'; retrievedNotes: RetrievedNote[]; contextChunks: RetrievedChunk[] }> {
+  const embeddingProvider = getEmbeddingProvider();
+
+  if (!embeddingProvider) {
+    const retrievedNotes = await keywordSearch(db, userId, question, topK, collectionIds, noteIds);
+    return { mode: 'keyword', retrievedNotes, contextChunks: [] };
+  }
+
+  // 1. Embed the question (asymmetric retrieval: query space).
+  const [queryVector] = await embedWithCache([{ text: question }], 'query', embeddingProvider);
+
+  // 2. Vector search. The HNSW index backs the ORDER BY, so this is an
+  //    approximate nearest-neighbour lookup rather than a full scan.
+  const fetchCount = Math.min(30, Math.max(topK * 4, topK));
+  const searchParams: any[] = [vectorToSql(queryVector), userId, embeddingProvider.model, fetchCount];
+  let collectionFilter = '';
+  if (collectionIds.length > 0) {
+    searchParams.push(collectionIds);
+    collectionFilter = ` AND c.id = ANY($${searchParams.length}::uuid[])`;
+  }
+  let noteFilter = '';
+  if (noteIds.length > 0) {
+    searchParams.push(noteIds);
+    noteFilter = ` AND n.id = ANY($${searchParams.length}::uuid[])`;
+  }
+  const searchResult = await db.query(
+    `SELECT e.note_id as "noteId",
+            e.chunk_content as "chunkContent",
+            e.chunk_index as "chunkIndex",
+            n.title,
+            n.content,
+            c.name as "collectionName",
+            COALESCE((
+              SELECT string_agg(DISTINCT tg.name, ',')
+              FROM "note_tags" nt
+              JOIN "tags" tg ON tg.id = nt.tag_id
+              WHERE nt.note_id = n.id
+            ), '') as "tagNames",
+            (1 - (e.embedding <=> $1::vector)) as similarity
+     FROM "note_embeddings" e
+     JOIN "notes" n ON n.id = e.note_id
+     LEFT JOIN "collections" c ON c.id = n.collection_id
+     WHERE n.user_id = $2
+       AND n.deleted_at IS NULL
+       AND e.embedding_model = $3${collectionFilter}${noteFilter}
+     ORDER BY e.embedding <=> $1::vector
+     LIMIT $4;`,
+    searchParams
+  );
+
+  const rawChunks = (searchResult.rows as any[])
+    .map((row) => ({
+      noteId: row.noteId,
+      title: row.title,
+      content: row.content,
+      chunkContent: row.chunkContent || row.content || '',
+      chunkIndex: row.chunkIndex ?? 0,
+      collectionName: row.collectionName || 'General',
+      tagNames: row.tagNames || '',
+      similarity: parseFloat(row.similarity ?? '0'),
+    }))
+    .filter((chunk) => chunk.similarity >= MIN_SIMILARITY);
+
+  // 3. Group chunks by note, keeping the strongest chunks of each note.
+  const grouped = new Map<string, { chunk: RetrievedChunk; extras: RetrievedChunk[] }>();
+  for (const chunk of rawChunks) {
+    const existing = grouped.get(chunk.noteId);
+    if (!existing) {
+      grouped.set(chunk.noteId, { chunk, extras: [] });
+    } else {
+      existing.extras.push(chunk);
+    }
+  }
+
+  const orderedNotes = Array.from(grouped.values())
+    .map((entry) => ({
+      best: entry.chunk,
+      chunks: [entry.chunk, ...entry.extras]
+        .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, MAX_CHUNKS_PER_NOTE),
+    }))
+    .sort((a, b) => b.best.similarity - a.best.similarity)
+    .slice(0, topK);
+
+  const contextChunks = orderedNotes.flatMap((entry) => entry.chunks);
+
+  const retrievedNotes: RetrievedNote[] = orderedNotes.map((entry) => ({
+    id: entry.best.noteId,
+    title: entry.best.title,
+    content: entry.best.content,
+    collectionName: entry.best.collectionName,
+    tags: entry.best.tagNames ? entry.best.tagNames.split(',').filter(Boolean) : [],
+    similarity: toPercent(entry.best.similarity),
+    snippet: snippet(entry.best.chunkContent),
+  }));
+
+  return { mode: 'vector', retrievedNotes, contextChunks };
+}
+
 export async function askNotes(
   req: AuthenticatedRequest,
   res: Response<ApiResponse>,
@@ -221,18 +334,13 @@ export async function askNotes(
       : [];
     const db = await getDatabase();
 
-    const embeddingProvider = getEmbeddingProvider();
+    const retrieval = await retrieve(db, userId, question, topK, collectionIds, noteIds);
 
-    // No embedding provider configured: fall back to keyword search so the
-    // endpoint keeps working before an API key is added.
-    if (!embeddingProvider) {
-      const retrievedNotes = await keywordSearch(db, userId, question, topK, collectionIds, noteIds);
-      const answer =
-        retrievedNotes.length > 0
-          ? `Based on your notes (${retrievedNotes.map((note) => `"${note.title}"`).join(', ')}):\n\n${retrievedNotes
-              .map((note) => `• ${note.title}: ${snippet(note.content, 300)}`)
-              .join('\n\n')}`
-          : 'No relevant notes found in your knowledge base.';
+    if (retrieval.mode === 'keyword') {
+      // Keyword fallback (no embedding provider configured): one extractive
+      // answer so the endpoint still works before an API key is added.
+      const { retrievedNotes } = retrieval;
+      const answer = buildKeywordAnswer(retrievedNotes);
 
       return res.status(200).json({
         success: true,
@@ -246,93 +354,7 @@ export async function askNotes(
       });
     }
 
-    // 1. Embed the question (asymmetric retrieval: query space).
-    const [queryVector] = await embedWithCache([{ text: question }], 'query', embeddingProvider);
-
-    // 2. Vector search. The HNSW index backs the ORDER BY, so this is an
-    //    approximate nearest-neighbour lookup rather than a full scan.
-    const fetchCount = Math.min(30, Math.max(topK * 4, topK));
-    const searchParams: any[] = [vectorToSql(queryVector), userId, embeddingProvider.model, fetchCount];
-    let collectionFilter = '';
-    if (collectionIds.length > 0) {
-      searchParams.push(collectionIds);
-      collectionFilter = ` AND c.id = ANY($${searchParams.length}::uuid[])`;
-    }
-    let noteFilter = '';
-    if (noteIds.length > 0) {
-      searchParams.push(noteIds);
-      noteFilter = ` AND n.id = ANY($${searchParams.length}::uuid[])`;
-    }
-    const searchResult = await db.query(
-      `SELECT e.note_id as "noteId",
-              e.chunk_content as "chunkContent",
-              e.chunk_index as "chunkIndex",
-              n.title,
-              n.content,
-              c.name as "collectionName",
-              COALESCE((
-                SELECT string_agg(DISTINCT tg.name, ',')
-                FROM "note_tags" nt
-                JOIN "tags" tg ON tg.id = nt.tag_id
-                WHERE nt.note_id = n.id
-              ), '') as "tagNames",
-              (1 - (e.embedding <=> $1::vector)) as similarity
-       FROM "note_embeddings" e
-       JOIN "notes" n ON n.id = e.note_id
-       LEFT JOIN "collections" c ON c.id = n.collection_id
-       WHERE n.user_id = $2
-         AND n.deleted_at IS NULL
-         AND e.embedding_model = $3${collectionFilter}${noteFilter}
-       ORDER BY e.embedding <=> $1::vector
-       LIMIT $4;`,
-      searchParams
-    );
-
-    const rawChunks = (searchResult.rows as any[])
-      .map((row) => ({
-        noteId: row.noteId,
-        title: row.title,
-        content: row.content,
-        chunkContent: row.chunkContent || row.content || '',
-        chunkIndex: row.chunkIndex ?? 0,
-        collectionName: row.collectionName || 'General',
-        tagNames: row.tagNames || '',
-        similarity: parseFloat(row.similarity ?? '0'),
-      }))
-      .filter((chunk) => chunk.similarity >= MIN_SIMILARITY);
-
-    // 3. Group chunks by note, keeping the strongest chunks of each note.
-    const grouped = new Map<string, { chunk: RetrievedChunk; extras: RetrievedChunk[] }>();
-    for (const chunk of rawChunks) {
-      const existing = grouped.get(chunk.noteId);
-      if (!existing) {
-        grouped.set(chunk.noteId, { chunk, extras: [] });
-      } else {
-        existing.extras.push(chunk);
-      }
-    }
-
-    const orderedNotes = Array.from(grouped.values())
-      .map((entry) => ({
-        best: entry.chunk,
-        chunks: [entry.chunk, ...entry.extras]
-          .sort((a, b) => b.similarity - a.similarity)
-          .slice(0, MAX_CHUNKS_PER_NOTE),
-      }))
-      .sort((a, b) => b.best.similarity - a.best.similarity)
-      .slice(0, topK);
-
-    const contextChunks = orderedNotes.flatMap((entry) => entry.chunks);
-
-    const retrievedNotes: RetrievedNote[] = orderedNotes.map((entry) => ({
-      id: entry.best.noteId,
-      title: entry.best.title,
-      content: entry.best.content,
-      collectionName: entry.best.collectionName,
-      tags: entry.best.tagNames ? entry.best.tagNames.split(',').filter(Boolean) : [],
-      similarity: toPercent(entry.best.similarity),
-      snippet: snippet(entry.best.chunkContent),
-    }));
+    const { contextChunks, retrievedNotes } = retrieval;
 
     // 4. Synthesise the answer from the retrieved context.
     let answer: string;
@@ -391,4 +413,155 @@ export async function askNotes(
   } catch (error) {
     next(error);
   }
+}
+
+export async function askRagStream(req: AuthenticatedRequest, res: Response): Promise<void> {
+  const userId = req.user!.id;
+  const { question, topK = 3 } = req.body;
+  const collectionIds: string[] = Array.isArray(req.body.collectionIds)
+    ? req.body.collectionIds.filter(Boolean)
+    : [];
+  const noteIds: string[] = Array.isArray(req.body.noteIds)
+    ? req.body.noteIds.filter(Boolean)
+    : [];
+
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const send = (event: string, data: unknown) => {
+    if (!res.destroyed) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+  let clientGone = false;
+  res.on('close', () => {
+    if (!res.writableEnded) clientGone = true;
+  });
+
+  try {
+    const retrieval = await retrieve(
+      await getDatabase(),
+      userId,
+      question,
+      topK,
+      collectionIds,
+      noteIds
+    );
+    if (clientGone) return;
+
+    if (retrieval.mode === 'keyword') {
+      const { retrievedNotes } = retrieval;
+      const answer = buildKeywordAnswer(retrievedNotes);
+      send('meta', { retrievedNotes, sources: [] });
+      send('delta', { text: answer });
+      send('done', { question, answer, retrievedNotes, sources: [], degraded: true });
+      res.end();
+      return;
+    }
+
+    const { contextChunks, retrievedNotes } = retrieval;
+    const sources = contextChunks.map((chunk, index) => ({
+      index: index + 1,
+      noteId: chunk.noteId,
+      title: chunk.title,
+      collectionName: chunk.collectionName,
+      similarity: toPercent(chunk.similarity),
+      chunkContent: chunk.chunkContent,
+    }));
+    send('meta', { retrievedNotes, sources });
+
+    if (contextChunks.length === 0) {
+      const answer = "I couldn't find that in your notes.";
+      send('delta', { text: answer });
+      send('done', { question, answer, retrievedNotes, sources, degraded: false });
+      res.end();
+      return;
+    }
+
+    const provider = getGenerationProvider();
+    if (!provider) {
+      const answer = buildExtractiveAnswer(contextChunks);
+      send('delta', { text: answer });
+      send('done', { question, answer, retrievedNotes, sources, degraded: true });
+      res.end();
+      return;
+    }
+
+    let answer = '';
+    let degraded = false;
+    const deadline = Date.now() + aiConfig.genDeadlineMs;
+    const generationRequest = {
+      systemInstruction: SYSTEM_INSTRUCTION,
+      prompt: `Context:\n\n${buildContext(contextChunks)}\n\nQuestion: ${question}`,
+      temperature: 0.2,
+      maxOutputTokens: 4096,
+    };
+    const stream = provider.generateStream
+      ? provider.generateStream(generationRequest)
+      : (async function* () {
+          yield {
+            type: 'delta' as const,
+            text: await provider.generate(generationRequest),
+          };
+        })();
+
+    const iterator = stream[Symbol.asyncIterator]();
+    try {
+      while (!clientGone) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          degraded = true;
+          console.warn('[rag] streamed generation reached its deadline');
+          break;
+        }
+        const step = await withDeadline(iterator.next(), remaining, 'generation');
+        if (step.done) break;
+        const event = step.value;
+        if (event.type === 'restart') {
+          answer = '';
+          send('restart', { reason: event.reason });
+        } else {
+          answer += event.text;
+          send('delta', { text: event.text });
+        }
+      }
+    } catch (error) {
+      console.error('[rag] streamed generation failed, using extractive fallback:', (error as Error).message);
+      answer = '';
+      degraded = true;
+      send('restart', { reason: 'fallback' });
+    } finally {
+      if (!clientGone) {
+        void iterator.return?.(undefined as never).catch(() => undefined);
+      }
+    }
+
+    if (clientGone) return;
+    if (!answer.trim()) {
+      answer = buildExtractiveAnswer(contextChunks);
+      degraded = true;
+      send('delta', { text: answer });
+    }
+    send('done', { question, answer, retrievedNotes, sources, degraded });
+    res.end();
+  } catch (error) {
+    console.error('[rag] streaming endpoint failed:', (error as Error).message);
+    if (!clientGone) {
+      send('error', { message: 'Something went wrong while generating the answer. Please try again.' });
+      res.end();
+    }
+  }
+}
+
+/** Build the plain-language answer used in keyword-fallback mode. */
+function buildKeywordAnswer(retrievedNotes: RetrievedNote[]): string {
+  if (retrievedNotes.length === 0) {
+    return 'No relevant notes found in your knowledge base.';
+  }
+  return (
+    `Based on your notes (${retrievedNotes.map((note) => `"${note.title}"`).join(', ')}):\n\n` +
+    retrievedNotes.map((note) => `• ${note.title}: ${snippet(note.content, 300)}`).join('\n\n')
+  );
 }

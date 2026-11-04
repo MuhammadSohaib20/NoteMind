@@ -34,10 +34,15 @@ export interface GenerationRequest {
   json?: boolean;
 }
 
+export type StreamEvent =
+  | { type: 'delta'; text: string }
+  | { type: 'restart'; reason: string };
+
 export interface GenerationProvider {
   readonly name: string;
   readonly model: string;
   generate(request: GenerationRequest): Promise<string>;
+  generateStream?(request: GenerationRequest): AsyncGenerator<StreamEvent>;
 }
 
 export class AiProviderError extends Error {

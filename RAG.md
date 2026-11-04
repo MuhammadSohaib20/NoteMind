@@ -125,15 +125,22 @@ can be swapped without touching them.
 ### Request flow
 
 ```
-POST /api/v1/rag/ask
+POST /api/v1/rag/ask/stream (Ask screen)
   │
   ├─ 1. Embed the question           (asymmetric: "task: question answering | query: ...")
   ├─ 2. Vector search                 HNSW index, ORDER BY embedding <=> $1 LIMIT k
   │     └─ scoped to the user's notes AND the active embedding model
   ├─ 3. Group chunks by note          best chunk per note, max 2 chunks per note
   ├─ 4. Generate the answer           grounded in the retrieved context, ending with a ## 📚 Sources list
-  └─ 5. Return { answer, retrievedNotes, sources }
+  └─ 5. Stream answer deltas as they are generated; finish with { answer, retrievedNotes, sources }
 ```
+
+`POST /api/v1/rag/ask` remains available for regular JSON responses. The Ask
+screen uses `/api/v1/rag/ask/stream`, which sends `meta`, incremental `delta`,
+optional `restart` during provider failover, and a final `done` event. Gemini
+and Groq use their native generation streams; if generation is unavailable,
+the same endpoint returns the extractive or keyword fallback as a complete
+delta.
 
 ### Embedding formats
 

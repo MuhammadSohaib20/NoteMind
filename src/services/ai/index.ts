@@ -4,7 +4,7 @@ import { EmbeddingCache } from './cache';
 import { chunkText, TextChunk } from './chunker';
 import { GeminiEmbeddingProvider, GeminiGenerationProvider } from './gemini';
 import { GroqGenerationProvider } from './groq';
-import { EmbedInput, EmbedTask, EmbeddingProvider, GenerationProvider, GenerationRequest } from './types';
+import { EmbedInput, EmbedTask, EmbeddingProvider, GenerationProvider, GenerationRequest, StreamEvent } from './types';
 
 export * from './types';
 export { chunkText, estimateTokens } from './chunker';
@@ -13,6 +13,11 @@ export { l2Normalize } from './gemini';
 let embeddingProvider: EmbeddingProvider | null | undefined;
 let generationProvider: GenerationProvider | null | undefined;
 let cache: EmbeddingCache | undefined;
+const unusableGenerationModels = new Set<string>();
+
+export function markGenerationModelUnusable(model: string): void {
+  if (model) unusableGenerationModels.add(model);
+}
 
 /**
  * Overrides the active providers. Used by tests to exercise the retrieval
@@ -88,6 +93,46 @@ class ResilientGenerationProvider implements GenerationProvider {
       ? lastError
       : new Error('All generation providers failed');
   }
+
+  async *generateStream(request: GenerationRequest): AsyncGenerator<StreamEvent> {
+    let lastError: unknown;
+
+    for (const provider of this.chain) {
+      if (unusableGenerationModels.has(provider.model)) continue;
+      let emitted = false;
+      const startedAt = Date.now();
+      const stream = provider.generateStream
+        ? provider.generateStream(request)
+        : singleDeltaStream(provider, request);
+
+      try {
+        for await (const event of stream) {
+          if (event.type === 'delta') emitted = true;
+          yield event;
+        }
+        if (!emitted) throw new Error('Generation provider returned an empty streamed response');
+        return;
+      } catch (error) {
+        lastError = error;
+        console.warn(
+          `[ai] streamed generation via "${provider.name}" (${provider.model}) failed: ` +
+            `${(error as Error).message}`
+        );
+        if (emitted) yield { type: 'restart', reason: provider.name };
+        const elapsed = Date.now() - startedAt;
+        if (!emitted && elapsed >= 5000) markGenerationModelUnusable(provider.model);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error('All generation providers failed');
+  }
+}
+
+async function* singleDeltaStream(
+  provider: GenerationProvider,
+  request: GenerationRequest
+): AsyncGenerator<StreamEvent> {
+  yield { type: 'delta', text: await provider.generate(request) };
 }
 
 /** Returns the configured generation provider, or null when unconfigured. */

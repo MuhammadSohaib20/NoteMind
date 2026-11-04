@@ -81,7 +81,9 @@ export const UploadModal: React.FC<UploadModalProps> = ({
         tags: tagsList,
       });
 
-      setSuccessMsg(`File "${selectedFile.name}" imported & indexed as a note!`);
+      setSuccessMsg(
+        `File "${selectedFile.name}" imported! Text extraction continues in the background.`
+      );
       setTimeout(() => {
         if (onSuccessSelect && createdNote) {
           onSuccessSelect(createdNote);
