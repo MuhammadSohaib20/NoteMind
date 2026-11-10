@@ -1,0 +1,53 @@
+# Containerised NoteMind stack.
+#
+# Usage:
+#   docker compose up --build -d
+#
+# This file is picked up by default (compose.yaml takes precedence over the
+# legacy docker-compose.yml, which only starts PostgreSQL for local tooling).
+# The app itself uses the embedded PGlite database and needs no DB container.
+
+name: notemind
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: notemind-app:local
+    container_name: notemind-app
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      AI_CACHE_DIR: /app/.ai-cache
+    volumes:
+      - pglite_data:/app/.pglite-data
+      - ai_cache:/app/.ai-cache
+      - backups:/app/backups
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 30s
+
+volumes:
+  pglite_data:
+    name: notemind_pglite_data
+  ai_cache:
+    name: notemind_ai_cache
+  backups:
+    name: notemind_backups
