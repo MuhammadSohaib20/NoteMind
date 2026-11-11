@@ -1,11 +1,12 @@
-import { createNoteMindDatabase } from './init-pglite';
+import '../src/config/env';
+import { closeDatabase, getDatabase } from '../src/db';
 
 export async function runExplainAnalyzeBenchmarks() {
   console.log('==================================================');
   console.log('⚡ NoteMind PostgreSQL EXPLAIN ANALYZE Benchmarking');
   console.log('==================================================\n');
 
-  const db = await createNoteMindDatabase();
+  const db = await getDatabase();
 
   // Get user ID
   const userRes = await db.query(`SELECT id FROM "users" LIMIT 1;`);
@@ -69,5 +70,13 @@ export async function runExplainAnalyzeBenchmarks() {
 }
 
 if (require.main === module) {
-  runExplainAnalyzeBenchmarks();
+  runExplainAnalyzeBenchmarks()
+    .then(async () => {
+      await closeDatabase();
+    })
+    .catch(async (error) => {
+      console.error('Benchmark failed:', error);
+      await closeDatabase();
+      process.exit(1);
+    });
 }

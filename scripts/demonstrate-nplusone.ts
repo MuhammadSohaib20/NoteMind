@@ -1,11 +1,12 @@
-import { createNoteMindDatabase } from './init-pglite';
+import '../src/config/env';
+import { closeDatabase, getDatabase } from '../src/db';
 
 export async function demonstrateNPlusOneQueryFix() {
   console.log('==================================================');
   console.log('🛠️ Week 3: N+1 Query Pattern vs JOIN Optimization');
   console.log('==================================================\n');
 
-  const db = await createNoteMindDatabase();
+  const db = await getDatabase();
 
   const userRes = await db.query(`SELECT id FROM "users" LIMIT 1;`);
   if (userRes.rows.length === 0) {
@@ -80,5 +81,13 @@ export async function demonstrateNPlusOneQueryFix() {
 }
 
 if (require.main === module) {
-  demonstrateNPlusOneQueryFix();
+  demonstrateNPlusOneQueryFix()
+    .then(async () => {
+      await closeDatabase();
+    })
+    .catch(async (error) => {
+      console.error('N+1 demonstration failed:', error);
+      await closeDatabase();
+      process.exit(1);
+    });
 }

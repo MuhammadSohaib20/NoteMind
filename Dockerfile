@@ -6,11 +6,12 @@
 # One image contains:
 #   - the compiled Express API (dist/)
 #   - the compiled React frontend (client/dist/), served by Express
-#   - Prisma migration SQL used by the embedded PGlite database
+#   - Prisma migration SQL applied to PostgreSQL at startup
 #   - eng.traineddata for offline OCR
 #
-# The app uses PGlite (PostgreSQL compiled to WASM), so no external database
-# container is required. Data lives in /app/.pglite-data (mount a volume).
+# The app connects to PostgreSQL 16 + pgvector through DATABASE_URL. Compose
+# starts the `db` service and waits for its health check before launching this
+# image; no database data is stored inside the image.
 # =============================================================================
 
 # ---------- shared base (build stages need devDependencies) ----------
@@ -70,9 +71,10 @@ COPY --from=client-build --chown=node:node /app/client/dist ./client/dist
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/notemind-entrypoint.sh
 RUN sed -i 's/\r$//' /usr/local/bin/notemind-entrypoint.sh
 
-# Writable locations: PGlite data, embedding cache, backup output.
-RUN mkdir -p /app/.pglite-data /app/.ai-cache /app/backups \
- && chown -R node:node /app/.pglite-data /app/.ai-cache /app/backups
+# Writable locations: persisted fallback JWT secret, embedding cache, backups.
+RUN mkdir -p /app/secrets /app/.ai-cache /app/backups \
+ && chmod 700 /app/secrets \
+ && chown -R node:node /app/secrets /app/.ai-cache /app/backups
 
 USER node
 EXPOSE 3000

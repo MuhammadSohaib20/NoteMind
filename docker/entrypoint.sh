@@ -1,11 +1,11 @@
 #!/bin/sh
 # NoteMind container entrypoint.
 #
-# JWT_SECRET is the only mandatory setting. Docker Desktop's "Run" button and
-# a plain `docker run` do not pass an env-file, so if the variable is missing
-# we generate a strong random secret and persist it inside the PGlite data
-# directory. That keeps the app runnable from any launch method, and sessions
-# survive restarts when /app/.pglite-data is backed by a volume.
+# JWT_SECRET is supplied by Compose through .env in the supported deployment.
+# As a fallback for `docker run`/Docker Desktop launches without an env-file,
+# generate a strong random secret and persist it in /app/secrets. Sessions then
+# survive restarts when that directory is backed by a volume. (The app still
+# requires DATABASE_URL pointing at a reachable PostgreSQL server.)
 #
 # An explicit JWT_SECRET always wins (docker compose with .env, --env-file,
 # -e JWT_SECRET=..., or Docker Desktop's environment fields).
@@ -13,7 +13,7 @@
 set -eu
 
 if [ -z "${JWT_SECRET:-}" ]; then
-  secret_file="${JWT_SECRET_FILE:-/app/.pglite-data/.jwt_secret}"
+  secret_file="${JWT_SECRET_FILE:-/app/secrets/.jwt_secret}"
 
   if [ -s "$secret_file" ]; then
     JWT_SECRET="$(cat "$secret_file")"

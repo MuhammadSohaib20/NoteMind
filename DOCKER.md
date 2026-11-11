@@ -1,49 +1,47 @@
-# Containerised NoteMind (API + frontend in one image)
+# Containerised NoteMind (PostgreSQL + API + frontend)
 
-The repository now has a self-contained Docker setup. **No existing project
-files were changed** — only these files were added:
+The repository ships a two-service Docker Compose stack:
 
-| File | Purpose |
-| --- | --- |
-| `Dockerfile` | Multi-stage build: compiles the backend and the React client, then produces a small production image that serves both on port `3000`. |
-| `.dockerignore` | Keeps `node_modules`, build output, `.env`, local PGlite data and backups out of the build context. |
-| `compose.yaml` | Default Docker Compose stack for the app. |
-| `docker/entrypoint.sh` | Supplies a persisted fallback `JWT_SECRET` when the container is launched without one (Docker Desktop Run button, plain `docker run`). |
-| `.gitattributes` | Keeps the entrypoint script LF-only so it also works when cloned on Windows. |
-| `DOCKER.md` | This guide. |
+| Service | Image | Purpose |
+| --- | --- | --- |
+| `db` | `pgvector/pgvector:pg16` | PostgreSQL 16 with the `vector` extension. Data lives in the `notemind_postgres_data` volume. |
+| `app` | built from `Dockerfile` | Multi-stage build that compiles the Express API and the React client, then serves both on port `3000`. |
 
-The app embeds **PGlite** (PostgreSQL compiled to WebAssembly), so the
-container does **not** need the PostgreSQL service from the older
-`docker-compose.yml`. That file is untouched and still works for local
-Prisma/pgvector tooling if you need it.
+`compose.yaml` is the only Compose file. The app waits for the database health
+check, applies pending migrations under a PostgreSQL advisory lock, and only
+then starts accepting traffic.
 
 ---
 
 ## Quick start
 
-1. Create your environment file (if you do not already have one):
+1. Create your environment file:
 
    ```bash
    cp .env.example .env
    ```
 
-   At minimum set a strong `JWT_SECRET`. Set `GEMINI_API_KEY` (and optionally
-   `GROQ_API_KEY`) to enable the RAG features.
+   Set at minimum:
 
-   If you skip this file, the container still starts: the entrypoint generates
-   a random `JWT_SECRET` automatically. AI/RAG features stay disabled until the
-   provider keys are provided.
+   - `POSTGRES_PASSWORD` — a long, URL-safe value (letters, digits, `-`, `_`,
+     `.`, `~`). It is embedded in the app's internal `DATABASE_URL`.
+   - `JWT_SECRET` — a long random string. If omitted, the entrypoint generates
+     one and persists it in the `notemind_app_secrets` volume.
+   - `GEMINI_API_KEY` and optionally `GROQ_API_KEY` to enable RAG.
+
+   Generate secrets without printing them:
+
+   ```bash
+   node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+   ```
+
+   `.env` is Git-ignored and excluded from the image by `.dockerignore`.
 
 2. Build and start:
 
    ```bash
    docker compose up --build -d
    ```
-
-   `docker compose` picks up `compose.yaml` automatically. Because the original
-   `docker-compose.yml` was intentionally left untouched, Compose may print a
-   one-line "Found multiple config files" warning — it confirms `compose.yaml`
-   is the file being used and is safe to ignore.
 
 3. Open <http://localhost:3000>.
 
@@ -56,6 +54,11 @@ $env:APP_PORT="8080"; docker compose up --build -d
 APP_PORT=8080 docker compose up --build -d
 ```
 
+The database port is published on loopback only
+(`127.0.0.1:${POSTGRES_PORT:-5432}`) for native `npm` tooling. Other machines
+reach NoteMind through port `3000`; they share the same accounts and notes
+because they all talk to the same PostgreSQL database.
+
 ---
 
 ## Common commands
@@ -63,6 +66,7 @@ APP_PORT=8080 docker compose up --build -d
 ```bash
 # Follow logs
 docker compose logs -f app
+docker compose logs -f db
 
 # Container / health status
 docker compose ps
@@ -73,11 +77,13 @@ docker compose up --build -d
 # Stop (data is kept)
 docker compose down
 
-# Stop and delete the database, cache, and backup volumes
+# Stop and delete the database, cache, secrets, and backup volumes
 docker compose down -v
 ```
 
-Health endpoint: <http://localhost:3000/health>
+Health endpoint: <http://localhost:3000/health>. It returns `200` only when the
+API can reach PostgreSQL; otherwise it returns `503` and Docker marks the
+container unhealthy.
 
 ---
 
@@ -96,70 +102,134 @@ docker compose up --build -d && until [ "$(docker inspect -f '{{.State.Health.St
 ```
 
 Expected result: `STATUS` shows `Up ... (healthy)` and `/health` returns
-`{"status":"ok",...}`.
+`{"status":"ok","database":"ok",...}`.
 
 ---
 
 ## Persistence
 
-The stack uses three named volumes, so rebuilding the image never loses data:
-
 | Volume | Container path | Contents |
 | --- | --- | --- |
-| `notemind_pglite_data` | `/app/.pglite-data` | The embedded PostgreSQL database (notes, users, embeddings). |
+| `notemind_postgres_data` | `/var/lib/postgresql/data` (db) | Users, notes, collections, tags, embeddings. |
+| `notemind_app_secrets` | `/app/secrets` (app) | Generated fallback `JWT_SECRET` when none is supplied. |
 | `notemind_ai_cache` | `/app/.ai-cache` | Cached embedding vectors (saves AI provider quota). |
 | `notemind_backups` | `/app/backups` | Output directory used by the backup/restore script. |
+| `notemind_pglite_data` | not mounted | Legacy embedded database, kept for the one-time migration and rollback. It is deliberately not declared in `compose.yaml`, so `docker compose down -v` cannot delete it. |
 
-Back up the database by copying the `pglite_data` volume, for example:
+Rebuilding the app image never touches these volumes. `docker compose down -v`
+deletes them.
+
+### Backups
+
+For a production-grade logical backup, use `pg_dump`:
 
 ```bash
-docker run --rm -v notemind_pglite_data:/data -v "$PWD":/backup alpine \
-  tar czf /backup/notemind-pglite-backup.tar.gz -C /data .
+# bash
+docker compose exec -T db pg_dump -U notemind -d notemind -Fc > backups/notemind-$(date +%Y%m%d-%H%M).dump
 ```
 
-> PGlite is a single-writer embedded database. Run exactly **one** app replica;
-> do not scale this service horizontally.
+```powershell
+# PowerShell
+docker compose exec -T db pg_dump -U notemind -d notemind -Fc > "backups\notemind-$(Get-Date -Format yyyyMMdd-HHmm).dump"
+```
+
+Restore into a fresh database (never over the live one without a tested
+backup):
+
+```bash
+docker compose exec -T db createdb -U notemind notemind_restore
+docker compose exec -T db pg_restore -U notemind -d notemind_restore --no-owner < backups/notemind-20260101-1200.dump
+```
+
+The repeatable restore drill is available as:
+
+```bash
+npm run db:backup-restore
+```
+
+It takes a transactionally consistent snapshot, restores it into a throwaway
+database, replays every migration, compares row counts, then drops the
+throwaway database. See [BACKUP_RESTORE_DRILL.md](BACKUP_RESTORE_DRILL.md).
+
+---
+
+## Migrating the old PGlite data (one time)
+
+The previous deployment stored accounts and notes in the
+`notemind_pglite_data` volume. Copy it out before starting the PostgreSQL
+stack:
+
+```bash
+mkdir -p backups/pglite-export
+docker run --rm \
+  -v notemind_pglite_data:/data \
+  -v "$PWD/backups/pglite-export:/export" \
+  alpine sh -c "cp -a /data/. /export/"
+```
+
+Then, with PostgreSQL reachable and `DATABASE_URL` pointing at it (the Compose
+database is published on `127.0.0.1:5432`):
+
+```bash
+npm run db:migrate-pglite -- --source=./backups/pglite-export --dry-run
+npm run db:migrate-pglite -- --source=./backups/pglite-export
+```
+
+The copy is transactional, skips rows that already exist by primary key, and
+uses `--replace` only if you intentionally want to clear the target tables
+first. Verify the counts printed by the script and by `npm run db:verify`
+before removing the legacy volume.
 
 ---
 
 ## Security notes
 
-- The image contains **no** `.env`, API keys, or JWT secret — `.dockerignore`
-  keeps them out of the build context.
-- An explicit `JWT_SECRET` always wins. The auto-generated fallback is used
-  only when none is supplied.
-- Generated secrets come from `crypto.randomBytes(48)` (96 hex characters) and
-  are created with owner-only permissions (`umask 077`, then `chmod 600`) at
-  `/app/.pglite-data/.jwt_secret`.
-- That file is stored inside the database volume, which is already sensitive:
-  anyone who can read that volume can read the database. Protect and encrypt
-  backups accordingly.
-- The app runs as the non-root `node` user. Do not run it with `--privileged`
-  or mount the Docker socket into it.
-- For production, set `JWT_SECRET` explicitly and run exactly one replica
-  (PGlite is single-writer).
+- The image contains **no** `.env`, API keys, database password, or JWT secret.
+  `.dockerignore` keeps them out of the build context.
+- The database is not exposed on a public interface; Compose publishes it on
+  `127.0.0.1` only. Use a firewall/HTTPS reverse proxy in front of port `3000`
+  when deploying to a server.
+- An explicit `JWT_SECRET` always wins. The auto-generated fallback is used only
+  when none is supplied, and is written to `/app/secrets/.jwt_secret` with
+  owner-only permissions (`umask 077`, then `chmod 600`).
+- The app and database containers run with `no-new-privileges`; the app runs as
+  the non-root `node` user. Do not run either with `--privileged` or mount the
+  Docker socket into them.
+- Backups contain password hashes, note content, and embeddings. Treat dump
+  files and the `notemind_backups` volume as sensitive and encrypt them at rest.
+- Rotate `POSTGRES_PASSWORD` and `JWT_SECRET` if either is ever exposed.
 
 ---
 
 ## Environment variables
 
-`compose.yaml` uses `env_file: .env`, so the same variables as local
-development are injected at runtime. The image itself never contains `.env`
-or API keys. `PORT` is forced to `3000` inside the container, and
-`AI_CACHE_DIR` is pointed at the mounted cache volume.
+`compose.yaml` reads `.env` via `env_file` and overrides `DATABASE_URL` so the
+app reaches the database as `db:5432` inside the Compose network. `PORT` is
+forced to `3000` and `AI_CACHE_DIR` points at the mounted cache volume.
 
-Useful variables from `.env.example`:
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `POSTGRES_PASSWORD` | yes | Password for the Compose database user. URL-safe characters only. |
+| `POSTGRES_USER` | no | Database user (default `notemind`). |
+| `POSTGRES_DB` | no | Database name (default `notemind`). |
+| `POSTGRES_PORT` | no | Loopback host port for the database (default `5432`). |
+| `DB_POOL_MAX` | no | Application connection pool size (default `10`). |
+| `DATABASE_URL` | outside Compose | Connection string used by `npm run dev`, scripts, and tests. |
+| `JWT_SECRET` | recommended | Token signing key. Generated and persisted when absent. |
+| `GEMINI_API_KEY` | for RAG | Embeddings and answer generation. |
+| `GROQ_API_KEY` | no | Optional fallback generation provider. |
+| `AI_*`, `PDF_*` | no | RAG/OCR tuning knobs. |
+| `APP_PORT` | no | Host port for the app (default `3000`). |
 
-- `JWT_SECRET` — signing key for auth tokens. Set it explicitly in production;
-  if omitted, the entrypoint generates and persists a random one.
-- `GEMINI_API_KEY` — enables embeddings and answer generation.
-- `GROQ_API_KEY` — optional fallback generation provider.
-- `AI_*`, `PDF_*` — RAG/OCR tuning knobs.
-- `APP_PORT` — host port only; set in your shell or `.env`, not needed by the app.
+Tests derive `<database>_test` from `DATABASE_URL` and recreate it before every
+run. They never touch the development database.
 
 ---
 
 ## Run without Compose
+
+The app needs a reachable PostgreSQL 16 + pgvector server. On Docker Desktop,
+`host.docker.internal` reaches a database running on the host:
 
 ```bash
 docker build -t notemind:local .
@@ -168,77 +238,82 @@ docker run -d --name notemind-app \
   --init \
   -p 3000:3000 \
   --env-file .env \
+  -e DATABASE_URL="postgresql://notemind:<password>@host.docker.internal:5432/notemind" \
   -e AI_CACHE_DIR=/app/.ai-cache \
-  -v notemind_pglite_data:/app/.pglite-data \
+  -v notemind_app_secrets:/app/secrets \
   -v notemind_ai_cache:/app/.ai-cache \
   -v notemind_backups:/app/backups \
   notemind:local
 ```
 
+On Linux, add `--add-host=host.docker.internal:host-gateway` or attach the
+container to the same Docker network as the database.
+
+Running the image from Docker Desktop's **Run** button is not a supported
+deployment: it does not provide `DATABASE_URL` or the Compose network. Use
+`docker compose up` instead.
+
 ---
 
 ## Troubleshooting
 
-### `Error: JWT_SECRET is not set`
+### `POSTGRES_PASSWORD must be set in .env`
 
-This is handled automatically now. If no `JWT_SECRET` is injected — for
-example when using Docker Desktop's **Run** button or a plain `docker run`
-without `--env-file` — `docker/entrypoint.sh` generates a strong random secret
-and stores it at `/app/.pglite-data/.jwt_secret`.
+Compose refuses to start rather than create a database with a default password.
+Add `POSTGRES_PASSWORD` to `.env` and re-run. If the database volume already
+exists, changing the variable does not change the stored password; rotate it
+inside PostgreSQL or recreate the volume (which deletes data).
 
-- With a persisted `/app/.pglite-data` volume, the same secret is reused on
-  restart, so existing login sessions stay valid.
-- Without a volume, both the secret and the database are ephemeral. That is
-  fine for a quick test; use Compose for real data.
-- An explicit `JWT_SECRET` (from `.env`, `--env-file`, `-e`, or Docker
-  Desktop's environment fields) always takes precedence.
-- To store the generated secret elsewhere, set `JWT_SECRET_FILE`.
+### The app exits with `ECONNREFUSED` / `Failed to start server`
 
-For production, still set `JWT_SECRET` explicitly. Use Compose from the project
-root (recommended):
+The API applies migrations at boot and exits if PostgreSQL is unreachable.
+Check `docker compose ps` and `docker compose logs db`. The app is configured to
+start only after the database health check passes, so a failure here usually
+means the database crashed or the password/connection string changed.
 
-```bash
-docker compose up --build -d
-```
+### `Migration "..." has changed after it was applied`
 
-Or pass the file explicitly:
+The migration runner stores a SHA-256 checksum for every applied file. Never
+edit an applied migration; add a new migration directory instead. This guard
+prevents two instances from silently drifting apart.
 
-```bash
-docker run -d --name notemind-app --init -p 3000:3000 \
-  --env-file .env \
-  -e AI_CACHE_DIR=/app/.ai-cache \
-  -v notemind_pglite_data:/app/.pglite-data \
-  -v notemind_ai_cache:/app/.ai-cache \
-  -v notemind_backups:/app/backups \
-  notemind-app:local
-```
+### `The pgvector extension is required but could not be enabled`
 
-When using the Docker Desktop Run dialog, add a volume for
-`/app/.pglite-data` if you want notes and the generated secret to survive
-container replacement.
+Use the bundled `pgvector/pgvector:pg16` image (default) or a managed provider
+that supports pgvector. The database user must be allowed to create the
+extension.
 
-### `Found multiple config files` warning
-
-Compose sees both `compose.yaml` (the app stack) and the untouched legacy
-`docker-compose.yml` (PostgreSQL only). It uses `compose.yaml`; the warning is
-informational.
-
-### Port 3000 is already in use
+### Port 3000 or 5432 is already in use
 
 Choose another host port:
 
 ```bash
 APP_PORT=8080 docker compose up -d
+POSTGRES_PORT=55432 docker compose up -d
 ```
+
+If you change `POSTGRES_PORT`, update the host-side `DATABASE_URL` used by
+native tools as well.
+
+### `database "notemind_test" does not exist` during tests
+
+The test setup creates and recreates the database automatically. The configured
+PostgreSQL user needs `CREATEDB`. The Compose `POSTGRES_USER` is a superuser, so
+this works out of the box.
 
 ---
 
 ## What happens on first boot
 
-1. Express starts and PGlite initialises `/app/.pglite-data`.
-2. The SQL files in `prisma/migrations/` are applied automatically.
-3. The compiled frontend is served by Express from `/app/client/dist`.
-4. The container reports healthy once `GET /health` succeeds.
+1. `db` starts PostgreSQL 16 and enables the `vector` extension during
+   migrations.
+2. The app waits for `pg_isready` to report healthy.
+3. `src/server.ts` connects through the pool, takes a PostgreSQL advisory lock,
+   and applies every pending file in `prisma/migrations/`, recording its
+   checksum in `schema_migrations`.
+4. Express serves the compiled frontend from `/app/client/dist`.
+5. The container reports healthy once `GET /health` confirms the database is
+   reachable.
 
 OCR works offline: `eng.traineddata` is bundled into the image and the
 tesseract.js worker is configured to read it from `/app`.

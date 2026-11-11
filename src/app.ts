@@ -11,6 +11,7 @@ import ragRoutes from './routes/rag.routes';
 import { errorHandler } from './middleware/errorHandler';
 import { structuredLogger } from './middleware/logger';
 import { authRateLimiter, apiRateLimiter } from './middleware/rateLimiter';
+import { checkDatabaseHealth } from './db';
 
 export function createApp(): Express {
   const app = express();
@@ -25,10 +26,21 @@ export function createApp(): Express {
   // predates a server restart (the dev workflow restarts the server to pick
   // up updates — an already-open tab must follow).
   const SERVER_STARTED_AT = Date.now();
-  app.get('/health', (req: Request, res: Response) => {
-    res
-      .status(200)
-      .json({ status: 'ok', service: 'NoteMind API', timestamp: new Date().toISOString(), startedAt: SERVER_STARTED_AT });
+  app.get('/health', async (req: Request, res: Response) => {
+    const base = {
+      service: 'NoteMind API',
+      timestamp: new Date().toISOString(),
+      startedAt: SERVER_STARTED_AT,
+    };
+
+    try {
+      // A 200 here means the API can actually reach PostgreSQL, not just that
+      // the Node process is alive. Docker then restarts an unhealthy container.
+      await checkDatabaseHealth();
+      return res.status(200).json({ ...base, status: 'ok', database: 'ok' });
+    } catch {
+      return res.status(503).json({ ...base, status: 'error', database: 'unreachable' });
+    }
   });
 
   // API Routes (v1) with rate limiting

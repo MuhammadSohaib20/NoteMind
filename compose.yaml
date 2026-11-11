@@ -1,15 +1,44 @@
-# Containerised NoteMind stack.
+# Containerised NoteMind stack: PostgreSQL 16 + pgvector and the app.
 #
 # Usage:
 #   docker compose up --build -d
 #
-# This file is picked up by default (compose.yaml takes precedence over the
-# legacy docker-compose.yml, which only starts PostgreSQL for local tooling).
-# The app itself uses the embedded PGlite database and needs no DB container.
+# The app waits for the database health check, then applies pending migrations
+# before it starts accepting traffic. Application data lives in the named
+# `postgres_data` volume; nothing is stored inside the image.
+#
+# `POSTGRES_PASSWORD` must be set in .env (see .env.example). Use a URL-safe
+# value (letters, digits, `-`, `_`, `.`, `~`) because it is embedded in the
+# app's DATABASE_URL. The database port is published on loopback only, for
+# native `npm` tooling; other machines reach the app through port 3000.
 
 name: notemind
 
 services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: notemind-db
+    restart: unless-stopped
+    init: true
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-notemind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-notemind}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
   app:
     build:
       context: .
@@ -18,6 +47,9 @@ services:
     container_name: notemind-app
     restart: unless-stopped
     init: true
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "${APP_PORT:-3000}:3000"
     env_file:
@@ -26,8 +58,11 @@ services:
       NODE_ENV: production
       PORT: "3000"
       AI_CACHE_DIR: /app/.ai-cache
+      # Overrides DATABASE_URL from .env: inside the Compose network the
+      # database is reachable as `db`, not `localhost`.
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-notemind}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-notemind}"
     volumes:
-      - pglite_data:/app/.pglite-data
+      - app_secrets:/app/secrets
       - ai_cache:/app/.ai-cache
       - backups:/app/backups
     security_opt:
@@ -45,9 +80,15 @@ services:
     stop_grace_period: 30s
 
 volumes:
-  pglite_data:
-    name: notemind_pglite_data
+  postgres_data:
+    name: notemind_postgres_data
+  app_secrets:
+    name: notemind_app_secrets
   ai_cache:
     name: notemind_ai_cache
   backups:
     name: notemind_backups
+# The legacy `notemind_pglite_data` volume is intentionally not declared here:
+# Compose never mounts it, and `docker compose down -v` therefore cannot delete
+# the rollback copy. Remove it manually once the PostgreSQL migration is
+# verified and no rollback is needed.
