@@ -1,0 +1,30 @@
+# Keep the build context small and never bake secrets/data into the image.
+
+# Version control and CI
+.git
+.github
+.gitignore
+
+# Installed dependencies and previous build output (rebuilt in the image)
+**/node_modules
+**/dist
+**/build
+**/coverage
+
+# Secrets — supplied at runtime via env-file/compose
+.env
+.env.local
+.env.*.local
+
+# Local runtime state
+.pglite-data
+.pglite-data*
+.ai-cache
+backups
+scratch
+
+# Not needed by the image build
+tests
+scripts
+*.log
+npm-debug.log*

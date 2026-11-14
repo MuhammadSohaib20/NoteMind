@@ -1,0 +1,4 @@
+# Shell entrypoints must keep LF endings to run inside Linux containers,
+# even when the repository is checked out on Windows with autocrlf enabled.
+*.sh text eol=lf
+docker/entrypoint.sh text eol=lf

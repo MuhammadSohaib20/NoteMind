@@ -1,4 +1,5 @@
-import { createNoteMindDatabase } from './init-pglite';
+import '../src/config/env';
+import { closeDatabase, getDatabase } from '../src/db';
 import { seedDatabase } from './seed';
 
 function generateMockVector(dim: number = 768, seed: number = 1.0): string {
@@ -14,7 +15,7 @@ async function verifyDatabase() {
   console.log('==================================================\n');
 
   try {
-    const db = await createNoteMindDatabase();
+    const db = await getDatabase();
     await seedDatabase(100, db);
 
     // 1. Verify Extension & Database Connection
@@ -112,7 +113,9 @@ async function verifyDatabase() {
     console.log('==================================================\n');
   } catch (err) {
     console.error('❌ Verification test failed:', err);
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    await closeDatabase();
   }
 }
 

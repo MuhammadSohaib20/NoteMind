@@ -16,7 +16,7 @@
  */
 
 import 'dotenv/config';
-import { getDatabase } from '../src/db';
+import { closeDatabase, getDatabase } from '../src/db';
 import {
   extractTextFromFile,
   isPlaceholderContent,
@@ -123,8 +123,12 @@ async function main(): Promise<void> {
 }
 
 main()
-  .then(() => process.exit(0))
-  .catch((err) => {
+  .then(async () => {
+    await closeDatabase();
+    process.exit(0);
+  })
+  .catch(async (err) => {
     console.error('OCR heal failed:', err);
+    await closeDatabase();
     process.exit(1);
   });

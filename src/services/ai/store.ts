@@ -1,4 +1,5 @@
 import { aiConfig } from '../../config/ai';
+import { Database, withTransactionOn } from '../../db';
 import { embedNote, getEmbeddingProvider, hashContent, vectorToSql } from './index';
 
 export interface EmbeddingSyncResult {
@@ -18,7 +19,7 @@ export interface EmbeddingSyncResult {
  * script can repair any gaps later.
  */
 export async function replaceNoteEmbeddings(
-  db: any,
+  db: Database,
   noteId: string,
   note: { title: string; content: string; tags?: string[] },
   options: { strict?: boolean } = {}
@@ -50,12 +51,13 @@ export async function replaceNoteEmbeddings(
       };
     }
 
-    await db.query('BEGIN;');
-    try {
-      await db.query(`DELETE FROM "note_embeddings" WHERE note_id = $1;`, [noteId]);
+    // One connection per note: the DELETE and every chunk INSERT either all
+    // land or none do, even when several notes are indexed concurrently.
+    await withTransactionOn(db, async (client) => {
+      await client.query(`DELETE FROM "note_embeddings" WHERE note_id = $1;`, [noteId]);
 
       for (const chunk of chunks) {
-        await db.query(
+        await client.query(
           `INSERT INTO "note_embeddings"
              (note_id, chunk_content, embedding, embedding_model, embedding_dim, chunk_index, content_hash)
            VALUES ($1, $2, $3::vector, $4, $5, $6, $7);`,
@@ -70,12 +72,7 @@ export async function replaceNoteEmbeddings(
           ]
         );
       }
-
-      await db.query('COMMIT;');
-    } catch (error) {
-      await db.query('ROLLBACK;').catch(() => undefined);
-      throw error;
-    }
+    });
 
     return {
       noteId,
@@ -104,7 +101,7 @@ export async function replaceNoteEmbeddings(
  * whose content hashes still match, so re-embedding can be skipped.
  */
 export async function noteEmbeddingsAreCurrent(
-  db: any,
+  db: Database,
   noteId: string,
   model: string,
   expectedHashes: string[]

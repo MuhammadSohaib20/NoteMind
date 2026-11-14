@@ -1,5 +1,5 @@
 import '../src/config/env';
-import { getDatabase } from '../src/db';
+import { closeDatabase, getDatabase } from '../src/db';
 import { aiConfig } from '../src/config/ai';
 import { chunkText } from '../src/services/ai/chunker';
 import { getEmbeddingProvider, hashContent } from '../src/services/ai';
@@ -189,8 +189,12 @@ async function main() {
 }
 
 main()
-  .then(() => process.exit(0))
-  .catch((error) => {
+  .then(async () => {
+    await closeDatabase();
+    process.exit(0);
+  })
+  .catch(async (error) => {
     console.error('❌ Backfill failed:', error);
+    await closeDatabase();
     process.exit(1);
   });

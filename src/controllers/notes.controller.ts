@@ -1,7 +1,7 @@
 import { Response, NextFunction } from 'express';
 import { z } from 'zod';
 import mammoth from 'mammoth';
-import { getDatabase } from '../db';
+import { getDatabase, withTransaction } from '../db';
 import { AuthenticatedRequest, ApiResponse } from '../types';
 import { MAX_NOTE_FILE_SIZE_BYTES } from '../constants/noteFiles';
 import { getEmbeddingProvider, chunkText, hashContent } from '../services/ai';
@@ -528,42 +528,42 @@ export async function createNote(
     const { collectionId, title, content, tags = [], fileName, fileType, fileData, filePreview } = req.body;
     const cleanTags = normalizeTags(tags);
 
-    await db.query('BEGIN;');
-
-    const result = await db.query(
-      `INSERT INTO "notes" (user_id, collection_id, title, content, file_name, file_type, file_data, file_preview)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, user_id as "userId", collection_id as "collectionId", title, content,
-                 file_name as "fileName", file_type as "fileType", file_data as "fileData", file_preview as "filePreview",
-                 created_at as "createdAt", updated_at as "updatedAt";`,
-      [userId, collectionId || null, title, content, fileName || null, fileType || null, fileData || null, filePreview || null]
-    );
-
-    const note = result.rows[0] as any;
-
-    for (const cleanTag of cleanTags) {
-      const tagRes = await db.query(
-        `INSERT INTO "tags" (user_id, name) VALUES ($1, $2)
-         ON CONFLICT (user_id, name) DO UPDATE SET name = EXCLUDED.name
-         RETURNING id;`,
-        [userId, cleanTag]
+    const note = await withTransaction(async (client) => {
+      const result = await client.query(
+        `INSERT INTO "notes" (user_id, collection_id, title, content, file_name, file_type, file_data, file_preview)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, user_id as "userId", collection_id as "collectionId", title, content,
+                   file_name as "fileName", file_type as "fileType", file_data as "fileData", file_preview as "filePreview",
+                   created_at as "createdAt", updated_at as "updatedAt";`,
+        [userId, collectionId || null, title, content, fileName || null, fileType || null, fileData || null, filePreview || null]
       );
-      const tagId = (tagRes.rows[0] as any).id;
 
-      await db.query(
-        `INSERT INTO "note_tags" (note_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;`,
-        [note.id, tagId]
-      );
-    }
+      const created = result.rows[0] as any;
 
-    if (collectionId) {
-      const colRes = await db.query(`SELECT name FROM "collections" WHERE id = $1;`, [collectionId]);
-      if (colRes.rows.length > 0) {
-        note.collectionName = (colRes.rows[0] as any).name;
+      for (const cleanTag of cleanTags) {
+        const tagRes = await client.query(
+          `INSERT INTO "tags" (user_id, name) VALUES ($1, $2)
+           ON CONFLICT (user_id, name) DO UPDATE SET name = EXCLUDED.name
+           RETURNING id;`,
+          [userId, cleanTag]
+        );
+        const tagId = (tagRes.rows[0] as any).id;
+
+        await client.query(
+          `INSERT INTO "note_tags" (note_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;`,
+          [created.id, tagId]
+        );
       }
-    }
 
-    await db.query('COMMIT;');
+      if (collectionId) {
+        const colRes = await client.query(`SELECT name FROM "collections" WHERE id = $1;`, [collectionId]);
+        if (colRes.rows.length > 0) {
+          created.collectionName = (colRes.rows[0] as any).name;
+        }
+      }
+
+      return created;
+    });
 
     // Embeddings are built in the background right away (scheduleAutoIndex),
     // so the note becomes searchable with no manual indexing step. This
@@ -578,7 +578,6 @@ export async function createNote(
       data: note,
     });
   } catch (error: any) {
-    await db.query('ROLLBACK;').catch(() => {});
     next(error);
   }
 }
@@ -684,42 +683,42 @@ export async function uploadNoteFile(
       }
     }
 
-    await db.query('BEGIN;');
-
-    const result = await db.query(
-      `INSERT INTO "notes" (user_id, collection_id, title, content, file_name, file_type, file_data, file_preview)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, user_id as "userId", collection_id as "collectionId", title, content,
-                 file_name as "fileName", file_type as "fileType", file_preview as "filePreview",
-                 created_at as "createdAt", updated_at as "updatedAt";`,
-      [userId, collectionId || null, noteTitle, placeholder, file.originalname, fileMime, fileDataUrl, null]
-    );
-
-    const note = result.rows[0] as any;
-
-    for (const cleanTag of tagsList) {
-      const tagRes = await db.query(
-        `INSERT INTO "tags" (user_id, name) VALUES ($1, $2)
-         ON CONFLICT (user_id, name) DO UPDATE SET name = EXCLUDED.name
-         RETURNING id;`,
-        [userId, cleanTag]
+    const note = await withTransaction(async (client) => {
+      const result = await client.query(
+        `INSERT INTO "notes" (user_id, collection_id, title, content, file_name, file_type, file_data, file_preview)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, user_id as "userId", collection_id as "collectionId", title, content,
+                   file_name as "fileName", file_type as "fileType", file_preview as "filePreview",
+                   created_at as "createdAt", updated_at as "updatedAt";`,
+        [userId, collectionId || null, noteTitle, placeholder, file.originalname, fileMime, fileDataUrl, null]
       );
-      const tagId = (tagRes.rows[0] as any).id;
 
-      await db.query(
-        `INSERT INTO "note_tags" (note_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;`,
-        [note.id, tagId]
-      );
-    }
+      const created = result.rows[0] as any;
 
-    if (collectionId) {
-      const colRes = await db.query(`SELECT name FROM "collections" WHERE id = $1;`, [collectionId]);
-      if (colRes.rows.length > 0) {
-        note.collectionName = (colRes.rows[0] as any).name;
+      for (const cleanTag of tagsList) {
+        const tagRes = await client.query(
+          `INSERT INTO "tags" (user_id, name) VALUES ($1, $2)
+           ON CONFLICT (user_id, name) DO UPDATE SET name = EXCLUDED.name
+           RETURNING id;`,
+          [userId, cleanTag]
+        );
+        const tagId = (tagRes.rows[0] as any).id;
+
+        await client.query(
+          `INSERT INTO "note_tags" (note_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;`,
+          [created.id, tagId]
+        );
       }
-    }
 
-    await db.query('COMMIT;');
+      if (collectionId) {
+        const colRes = await client.query(`SELECT name FROM "collections" WHERE id = $1;`, [collectionId]);
+        if (colRes.rows.length > 0) {
+          created.collectionName = (colRes.rows[0] as any).name;
+        }
+      }
+
+      return created;
+    });
 
     // Indexing for AI is explicit now; see createNote.
     note.indexed = false;
@@ -734,7 +733,6 @@ export async function uploadNoteFile(
       data: note,
     });
   } catch (error: any) {
-    await db.query('ROLLBACK;').catch(() => {});
     next(error);
   }
 }
@@ -750,77 +748,80 @@ export async function updateNote(
     const { id } = req.params;
     const { collectionId, title, content, tags, fileName, fileType, fileData, filePreview } = req.body;
 
-    await db.query('BEGIN;');
+    const note = await withTransaction(async (client) => {
+      const existing = await client.query(
+        `SELECT id, collection_id as "collectionId" FROM "notes" WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL;`,
+        [id, userId]
+      );
+      if (existing.rows.length === 0) {
+        return null;
+      }
 
-    const existing = await db.query(
-      `SELECT id, collection_id as "collectionId" FROM "notes" WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL;`,
-      [id, userId]
-    );
-    if (existing.rows.length === 0) {
-      await db.query('ROLLBACK;');
+      const currentCollectionId = (existing.rows[0] as any).collectionId;
+      const nextCollectionId =
+        collectionId !== undefined ? (collectionId ? collectionId : null) : currentCollectionId;
+
+      const result = await client.query(
+        `UPDATE "notes"
+         SET collection_id = $1,
+             title = COALESCE($2, title),
+             content = COALESCE($3, content),
+             file_name = COALESCE($4, file_name),
+             file_type = COALESCE($5, file_type),
+             file_data = COALESCE($6, file_data),
+             file_preview = COALESCE($7, file_preview),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $8 AND user_id = $9 AND deleted_at IS NULL
+         RETURNING id, user_id as "userId", collection_id as "collectionId", title, content,
+                   file_name as "fileName", file_type as "fileType", file_data as "fileData", file_preview as "filePreview",
+                   created_at as "createdAt", updated_at as "updatedAt";`,
+        [nextCollectionId, title || null, content || null, fileName || null, fileType || null, fileData || null, filePreview || null, id, userId]
+      );
+
+      const updated = result.rows[0] as any;
+
+      if (tags !== undefined) {
+        const cleanTags = normalizeTags(tags);
+        await client.query(`DELETE FROM "note_tags" WHERE note_id = $1;`, [id]);
+        for (const cleanTag of cleanTags) {
+          const tagRes = await client.query(
+            `INSERT INTO "tags" (user_id, name) VALUES ($1, $2)
+             ON CONFLICT (user_id, name) DO UPDATE SET name = EXCLUDED.name
+             RETURNING id;`,
+            [userId, cleanTag]
+          );
+          const tagId = (tagRes.rows[0] as any).id;
+
+          await client.query(
+            `INSERT INTO "note_tags" (note_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;`,
+            [id, tagId]
+          );
+        }
+        updated.tags = cleanTags;
+      } else {
+        const existingTagsRes = await client.query(
+          `SELECT t.name FROM "note_tags" nt JOIN "tags" t ON t.id = nt.tag_id WHERE nt.note_id = $1 ORDER BY t.name ASC;`,
+          [id]
+        );
+        updated.tags = existingTagsRes.rows.map((r: any) => r.name);
+      }
+
+      if (updated.collectionId) {
+        const colRes = await client.query(`SELECT name FROM "collections" WHERE id = $1;`, [updated.collectionId]);
+        if (colRes.rows.length > 0) {
+          updated.collectionName = (colRes.rows[0] as any).name;
+        }
+      }
+
+      return updated;
+    });
+
+    if (!note) {
       return res.status(404).json({
         success: false,
         error: { message: 'Note not found or access denied' },
       });
     }
-
-    const currentCollectionId = (existing.rows[0] as any).collectionId;
-    const nextCollectionId =
-      collectionId !== undefined ? (collectionId ? collectionId : null) : currentCollectionId;
-
-    const result = await db.query(
-      `UPDATE "notes"
-       SET collection_id = $1,
-           title = COALESCE($2, title),
-           content = COALESCE($3, content),
-           file_name = COALESCE($4, file_name),
-           file_type = COALESCE($5, file_type),
-           file_data = COALESCE($6, file_data),
-           file_preview = COALESCE($7, file_preview),
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $8 AND user_id = $9 AND deleted_at IS NULL
-       RETURNING id, user_id as "userId", collection_id as "collectionId", title, content,
-                 file_name as "fileName", file_type as "fileType", file_data as "fileData", file_preview as "filePreview",
-                 created_at as "createdAt", updated_at as "updatedAt";`,
-      [nextCollectionId, title || null, content || null, fileName || null, fileType || null, fileData || null, filePreview || null, id, userId]
-    );
-
-    const note = result.rows[0] as any;
-
-    if (tags !== undefined) {
-      const cleanTags = normalizeTags(tags);
-      await db.query(`DELETE FROM "note_tags" WHERE note_id = $1;`, [id]);
-      for (const cleanTag of cleanTags) {
-        const tagRes = await db.query(
-          `INSERT INTO "tags" (user_id, name) VALUES ($1, $2)
-           ON CONFLICT (user_id, name) DO UPDATE SET name = EXCLUDED.name
-           RETURNING id;`,
-          [userId, cleanTag]
-        );
-        const tagId = (tagRes.rows[0] as any).id;
-
-        await db.query(
-          `INSERT INTO "note_tags" (note_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;`,
-          [id, tagId]
-        );
-      }
-      note.tags = cleanTags;
-    } else {
-      const existingTagsRes = await db.query(
-        `SELECT t.name FROM "note_tags" nt JOIN "tags" t ON t.id = nt.tag_id WHERE nt.note_id = $1 ORDER BY t.name ASC;`,
-        [id]
-      );
-      note.tags = existingTagsRes.rows.map((r: any) => r.name);
-    }
-
-    if (note.collectionId) {
-      const colRes = await db.query(`SELECT name FROM "collections" WHERE id = $1;`, [note.collectionId]);
-      if (colRes.rows.length > 0) {
-        note.collectionName = (colRes.rows[0] as any).name;
-      }
-    }
-
-    await db.query('COMMIT;');
 
     // Editing content, title or tags invalidates the stored AI snapshot:
     // embeddings are derived from exactly those fields. Drop them, then
@@ -843,7 +844,6 @@ export async function updateNote(
       data: note,
     });
   } catch (error: any) {
-    await db.query('ROLLBACK;').catch(() => {});
     next(error);
   }
 }

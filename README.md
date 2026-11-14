@@ -6,13 +6,13 @@ An intelligent, full-stack note-taking and knowledge base application featuring 
 
 ## 🌟 Overview
 
-**NoteMind** provides an end-to-end workspace for managing, querying, and interacting with notes using modern AI vector search and local databases.
+**NoteMind** provides an end-to-end workspace for managing, querying, and interacting with notes using modern AI vector search and PostgreSQL.
 
 - 📝 **Rich Note Management**: Full CRUD operations, tagged notes, and nested collection organization.
 - 🔍 **RAG & Search Capabilities**: Ask questions directly across your notes using Retrieval-Augmented Generation context.
 - 🔒 **Secure Authentication**: Hardened authentication system, JWT tokens, and rate limiting.
 - 🎨 **Modern UI**: Full dark/light mode toggle, clean responsive design built with Vite + React + TailwindCSS.
-- 🗄️ **Flexible Database Support**: PostgreSQL database schema with Prisma ORM and Supabase/PGlite integration.
+- 🗄️ **PostgreSQL + pgvector**: One shared database for every device, with Prisma migration SQL tracked by a checksummed migration runner.
 
 ---
 
@@ -26,7 +26,8 @@ An intelligent, full-stack note-taking and knowledge base application featuring 
 
 ### Backend
 - **Server**: Node.js & Express (TypeScript)
-- **Database / ORM**: PostgreSQL / Prisma ORM
+- **Database**: PostgreSQL 16 + pgvector (via `pg` connection pool)
+- **Schema / migrations**: Prisma migration SQL, applied by a checksummed runner
 - **API Specification**: OpenAPI 3.0 (`openapi.yaml`)
 - **Testing**: Jest & Supertest integration test suite
 
@@ -35,46 +36,49 @@ An intelligent, full-stack note-taking and knowledge base application featuring 
 ## 🚀 Getting Started
 
 ### 1. Prerequisites
-- Node.js (v18+)
-- npm or yarn
-- PostgreSQL (or local PGlite)
+
+- Docker Desktop (recommended), **or**
+- Node.js 20+ and a PostgreSQL 16 server with the `pgvector` extension.
 
 ### 2. Environment Setup
-Copy the example environment file and configure your local settings:
 
 ```bash
 cp .env.example .env
 ```
 
-Set your local PostgreSQL database URL in `.env`:
-```env
-DATABASE_URL="postgresql://postgres:postgrespassword@localhost:5432/notemind?schema=public"
-```
+Set `POSTGRES_PASSWORD` (URL-safe characters), `JWT_SECRET`, and your AI
+provider keys. `DATABASE_URL` is used when the API runs outside Docker.
 
-### 3. Installation
-Install root dependencies and client dependencies:
+### 3. Run the full stack (one command)
 
 ```bash
-# Install backend dependencies
+docker compose up --build -d
+```
+
+Open <http://localhost:3000>. Compose starts PostgreSQL, waits for it to become
+healthy, then starts the app. Migrations are applied automatically. See
+[DOCKER.md](DOCKER.md) for persistence, backups, and the one-time PGlite data
+copy.
+
+### 4. Local development (without the app container)
+
+Start only the database:
+
+```bash
+docker compose up -d db
+```
+
+Install dependencies and run the servers:
+
+```bash
 npm install
+(cd client && npm install)
 
-# Install client dependencies
-cd client
-npm install
-cd ..
-```
-
-### 4. Running the Project
-
-**Start backend API server:**
-```bash
+# Terminal 1 — API on http://localhost:3000
 npm run dev
-```
 
-**Start frontend client:**
-```bash
-cd client
-npm run dev
+# Terminal 2 — Vite dev server
+cd client && npm run dev
 ```
 
 ---
@@ -82,12 +86,25 @@ npm run dev
 ## 🧪 Testing & Database Scripts
 
 ```bash
-# Run backend integration tests
+# Jest integration tests. A disposable `<db>_test` database is recreated
+# before every run; the development database is never touched.
 npm test
 
-# Run database verification & seed script
-npx ts-node scripts/verify-db.ts
+# Apply migrations and print the schema version / pgvector status.
+npm run db:init
+
+# Seed 5,000 notes, tags, and 768-dim embeddings (destructive).
+npm run db:seed
+
+# Seed a small dataset and verify queries, indexes, and vector search.
+npm run db:verify
+
+# Backup to JSON, restore into a throwaway database, verify row counts.
+npm run db:backup-restore
 ```
+
+The PostgreSQL user needs `CREATEDB` for the test database and the restore
+drill. The Compose user is a superuser, so this works out of the box.
 
 ---
 
@@ -95,14 +112,16 @@ npx ts-node scripts/verify-db.ts
 
 ```
 ├── client/              # React + Vite frontend application
-├── prisma/              # Prisma schema & migrations
+├── prisma/              # Prisma schema & SQL migrations
 ├── src/                 # Express REST API backend
 │   ├── controllers/     # Route logic controllers
 │   ├── middleware/      # Auth, logging, rate limiter
 │   └── routes/          # API endpoint routes
 ├── scripts/             # DB seeding, benchmarks, and utility scripts
 ├── supabase/            # Supabase database schemas & functions
-└── tests/               # Unit and integration test suites
+├── tests/               # Unit and integration test suites
+├── compose.yaml         # App + PostgreSQL stack
+└── Dockerfile           # Multi-stage production image
 ```
 
 ---

@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { createApp } from '../src/app';
-import { getDatabase } from '../src/db';
+import { closeDatabase, getDatabase } from '../src/db';
 
 async function runApiTests() {
   console.log('==================================================');
@@ -127,8 +127,17 @@ async function runApiTests() {
     console.log('==================================================\n');
   } catch (error) {
     console.error('❌ API Integration Test Failed:', error);
+    await closeDatabase();
     process.exit(1);
   }
 }
 
-runApiTests();
+runApiTests()
+  .then(async () => {
+    await closeDatabase();
+  })
+  .catch(async (error) => {
+    console.error('Fatal error in API test runner:', error);
+    await closeDatabase();
+    process.exit(1);
+  });

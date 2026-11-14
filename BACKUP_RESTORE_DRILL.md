@@ -8,7 +8,7 @@ This document defines the official **Backup Strategy** and documents the **Resto
 - **Recovery Point Objective (RPO)**: Maximum allowable data loss is **< 1 hour**.
 - **Recovery Time Objective (RTO)**: Maximum acceptable downtime for full database restoration is **< 15 minutes**.
 - **Backup Types**:
-  1. **Automated Daily Snapshots**: Full export of database schema and table contents stored in immutable JSON/SQL formats.
+  1. **Logical snapshots**: `pg_dump` (or the JSON snapshot produced by `npm run db:backup-restore`) for portable full backups.
   2. **Continuous WAL / Transaction Logs** (Production PostgreSQL / Supabase): Enables point-in-time recovery (PITR).
 
 ---
@@ -21,9 +21,15 @@ npm run db:backup-restore
 ```
 
 ### Process Description
-1. Connects to the active primary database instance.
-2. Extracts entity state from `users`, `collections`, `notes`, `tags`, `note_tags`, and `note_embeddings`.
-3. Serializes the snapshot into `./backups/backup_<timestamp>.json` with complete relational context.
+1. Connects to the active PostgreSQL database through the application pool.
+2. Opens a `REPEATABLE READ`, `READ ONLY` transaction so every table is read from one consistent snapshot.
+3. Extracts entity state from `users`, `collections`, `notes`, `tags`, `note_tags`, and `note_embeddings`.
+4. Serializes the snapshot into `./backups/backup_<timestamp>.json`.
+5. Restores that snapshot into a throwaway database and verifies row counts before dropping it.
+
+For production, prefer `pg_dump -Fc` for large databases, plus WAL archiving
+or the provider's PITR feature. The JSON drill is a portability and verification
+exercise, not a replacement for `pg_dump`.
 
 ---
 
@@ -31,10 +37,11 @@ npm run db:backup-restore
 
 To ensure backups are not corrupted and can be restored reliably under disaster recovery conditions:
 
-1. **Isolation**: A clean, uninitialized temporary database instance is created (`.pglite-restore-test`).
-2. **Schema Application**: The initial migration schema (`prisma/migrations/0_init/migration.sql`) is executed on the target instance.
-3. **Data Ingestion**: Tables are re-populated sequentially maintaining foreign key dependency order (`users` -> `collections` & `tags` -> `notes` -> `note_tags` & `note_embeddings`).
-4. **Validation**: Row counts and relational integrity are verified against the source database.
+1. **Isolation**: A throwaway PostgreSQL database is created (`notemind_restore_<timestamp>`). Permanent data is never truncated or overwritten.
+2. **Schema Application**: Every migration in `prisma/migrations/` is replayed through the real migration runner, including the pgvector extension and `schema_migrations` checksums.
+3. **Data Ingestion**: Tables are re-populated in one transaction, respecting foreign keys (`users` -> `collections` & `tags` -> `notes` -> `note_tags` & `note_embeddings`).
+4. **Validation**: Row counts are compared table by table against the source snapshot.
+5. **Cleanup**: The throwaway database is terminated and dropped.
 
 ---
 
