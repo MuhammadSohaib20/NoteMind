@@ -16,6 +16,9 @@ import { checkDatabaseHealth } from './db';
 export function createApp(): Express {
   const app = express();
 
+  // Trust Cloudflare and reverse proxy headers (CF-Connecting-IP, X-Forwarded-For)
+  app.set('trust proxy', 1);
+
   // Middleware
   app.use(cors());
   app.use(express.json());
