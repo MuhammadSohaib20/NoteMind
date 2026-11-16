@@ -1,0 +1,7 @@
+# Cloudflare Pages Redirects & Reverse Proxy Configuration
+# API endpoints proxied through to NoteMind Express Backend
+/api/*  https://api.notemind.com/api/:splat  200
+/health https://api.notemind.com/health       200
+
+# Single Page Application (SPA) routing fallback
+/*      /index.html                           200

@@ -4,7 +4,7 @@ import { AuthenticatedRequest } from '../types';
 export function structuredLogger(req: Request, res: Response, next: NextFunction) {
   const startTime = Date.now();
   const { method, originalUrl } = req;
-  const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
+  const ip = (req.headers['cf-connecting-ip'] as string) || req.ip || req.socket.remoteAddress || '127.0.0.1';
 
   res.on('finish', () => {
     const duration = Date.now() - startTime;

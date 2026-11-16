@@ -1,5 +1,3 @@
-ALTER TABLE "collections" ADD COLUMN IF NOT EXISTS "color_index" INTEGER;
-
 WITH ranked_collections AS (
   SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at, id) - 1 AS color_index
   FROM "collections"

@@ -18,7 +18,9 @@
     "db:backup-restore": "ts-node scripts/backup-restore.ts",
     "db:reembed": "ts-node scripts/reembed.ts",
     "db:ocr-heal": "ts-node scripts/heal-scanned-notes.ts",
-    "test:ocr": "ts-node scripts/ocr-smoke-test.ts"
+    "test:ocr": "ts-node scripts/ocr-smoke-test.ts",
+    "test:k6": "k6 run tests/load/k6-load-test.js",
+    "test:load": "ts-node tests/load/run-load-test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.30.0",
