@@ -124,3 +124,6 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: client
           command: deploy
+          # wrangler 4 is required for the `run_worker_first` assets option
+          # used by client/wrangler.jsonc.
+          wranglerVersion: '4'
