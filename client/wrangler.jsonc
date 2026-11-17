@@ -1,0 +1,24 @@
+{
+  // The Worker name must match the existing workers.dev hostname:
+  //   https://notemind.sohaibzaheer1987.workers.dev
+  "name": "notemind",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-11-17",
+
+  // Only the Vite build output is uploaded. Deploying the source folder was
+  // what produced the blank page (the browser was served /src/main.tsx).
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/health"]
+  },
+
+  // API_ORIGIN is intentionally not committed: it depends on where the Express
+  // API is hosted. Store it as a secret (dashboard > Workers > notemind >
+  // Settings > Variables and Secrets, or `wrangler secret put API_ORIGIN`).
+  // Secrets survive `wrangler deploy`; plain vars are replaced by the config.
+  "observability": {
+    "enabled": true
+  }
+}

@@ -31,3 +31,7 @@ Thumbs.db
 
 # Local throwaway experiments
 scratch/
+
+# Cloudflare Workers local state
+.wrangler/
+.dev.vars

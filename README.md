@@ -140,6 +140,17 @@ Full architecture, API payloads, tuning knobs and troubleshooting: see **[RAG.md
 
 ---
 
+## Deployment
+
+The React client runs as a Cloudflare Worker at
+`https://notemind.sohaibzaheer1987.workers.dev`. The Worker serves the built Vite bundle
+from `client/dist` and proxies `/api/*` and `/health` to the Express API, so the browser
+uses one origin and CORS never applies.
+
+Setup, API hosting options and verification steps: **[DEPLOY_CLOUDFLARE.md](DEPLOY_CLOUDFLARE.md)**.
+
+---
+
 ## 📄 License
 
 MIT License

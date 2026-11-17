@@ -106,20 +106,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build frontend for Cloudflare Pages
+      - name: Build frontend for Cloudflare
         run: |
           npm ci --prefix client
           npm run build --prefix client
 
-      - name: Deploy Frontend to Cloudflare Pages
+      # Deploys the Worker defined in client/wrangler.jsonc: it serves the built
+      # SPA and proxies /api/* to the Express API (API_ORIGIN secret).
+      - name: Deploy Worker to Cloudflare
         if: env.CLOUDFLARE_API_TOKEN != '' && env.CLOUDFLARE_ACCOUNT_ID != ''
-        uses: cloudflare/pages-action@v1
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: 'notemind-client'
-          directory: 'client/dist'
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          workingDirectory: client
+          command: deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
