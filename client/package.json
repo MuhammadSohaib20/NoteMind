@@ -31,3 +31,5 @@
     "vite": "^5.2.11"
   }
 }
+"@cloudflare/vite-plugin": "^1.0.0",
+"wrangler": "^3.0.0"
