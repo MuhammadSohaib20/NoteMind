@@ -41,6 +41,10 @@ export const AuthModal: React.FC = () => {
     resetForm();
   }, []);
 
+  const handleColdStartRetry = () => {
+    setInfoMessage('The API is waking up, retrying…');
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -55,14 +59,15 @@ export const AuthModal: React.FC = () => {
     setLoading(true);
     try {
       if (isLogin) {
-        await login(email, password);
+        await login(email, password, handleColdStartRetry);
       } else {
-        await signup(email, password, fullName.trim() || undefined);
+        await signup(email, password, fullName.trim() || undefined, handleColdStartRetry);
       }
       resetForm();
     } catch (err: any) {
       setError(err.message || 'Authentication failed. Please check your credentials.');
     } finally {
+      setInfoMessage(null);
       setLoading(false);
     }
   };
@@ -74,14 +79,15 @@ export const AuthModal: React.FC = () => {
     const demoEmail = `demo.${provider.toLowerCase()}@notemind.ai`;
     const demoPass = 'notemind123';
     try {
-      await login(demoEmail, demoPass);
+      await login(demoEmail, demoPass, handleColdStartRetry);
     } catch {
       try {
-        await signup(demoEmail, demoPass, 'Muhammad Sohaib');
+        await signup(demoEmail, demoPass, 'Muhammad Sohaib', handleColdStartRetry);
       } catch (err: any) {
         setError(err.message || `Failed to sign in with ${provider}`);
       }
     } finally {
+      setInfoMessage(null);
       setLoading(false);
     }
   };

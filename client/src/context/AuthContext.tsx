@@ -7,8 +7,13 @@ interface AuthContextType {
   user: User | null;
   token: string | null;
   isAuthenticated: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  signup: (email: string, password: string, fullName?: string) => Promise<void>;
+  login: (email: string, password: string, onColdStartRetry?: () => void) => Promise<void>;
+  signup: (
+    email: string,
+    password: string,
+    fullName?: string,
+    onColdStartRetry?: () => void,
+  ) => Promise<void>;
   updateProfile: (updates: Partial<User>) => void;
   updatePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => void;
@@ -53,11 +58,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return localStorage.getItem('notemind_token');
   });
 
-  const login = async (email: string, password: string) => {
-    const res = await apiFetch<{ token: string; user: User }>('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-    });
+  const login = async (email: string, password: string, onColdStartRetry?: () => void) => {
+    const res = await apiFetch<{ token: string; user: User }>(
+      '/auth/login',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      },
+      { retryOnColdStart: true, onColdStartRetry },
+    );
 
     if (res.data) {
       queryClient.clear();
@@ -69,11 +78,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const signup = async (email: string, password: string, fullName?: string) => {
-    const res = await apiFetch<{ token: string; user: User }>('/auth/signup', {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-    });
+  const signup = async (
+    email: string,
+    password: string,
+    fullName?: string,
+    onColdStartRetry?: () => void,
+  ) => {
+    const res = await apiFetch<{ token: string; user: User }>(
+      '/auth/signup',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      },
+      { retryOnColdStart: true, onColdStartRetry },
+    );
 
     if (res.data) {
       queryClient.clear();
