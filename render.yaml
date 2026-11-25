@@ -1,0 +1,37 @@
+# Render Blueprint for the NoteMind API.
+#
+# The Cloudflare Worker serves the built React client and proxies /api/* and
+# /health to this service. The app applies its own migrations and enables the
+# pgvector extension at boot, so DATABASE_URL only needs a PostgreSQL 16
+# database whose user may create extensions (Neon and Supabase both allow it).
+#
+# Deploy: Render Dashboard -> New -> Blueprint -> select this repository.
+# Render prompts for the three `sync: false` values below.
+
+services:
+  - type: web
+    name: notemind-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: AI_CACHE_DIR
+        value: /app/.ai-cache
+      # Render generates and stores a long random signing key.
+      - key: JWT_SECRET
+        generateValue: true
+      # Managed PostgreSQL connection string. Must end with ?sslmode=require
+      # (the pool passes the URL through to node-postgres unchanged).
+      - key: DATABASE_URL
+        sync: false
+      # Free Gemini key from https://aistudio.google.com/apikey
+      - key: GEMINI_API_KEY
+        sync: false
+      # Optional second provider, used when Gemini fails.
+      - key: GROQ_API_KEY
+        sync: false
