@@ -13,6 +13,8 @@ services:
     name: notemind-api
     runtime: docker
     plan: free
+    # Put the API in the same region as the Supabase database (ap-southeast-1).
+    region: singapore
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
