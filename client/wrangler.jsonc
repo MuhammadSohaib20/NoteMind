@@ -14,10 +14,14 @@
     "run_worker_first": ["/api/*", "/health"]
   },
 
-  // API_ORIGIN is intentionally not committed: it depends on where the Express
-  // API is hosted. Store it as a secret (dashboard > Workers > notemind >
-  // Settings > Variables and Secrets, or `wrangler secret put API_ORIGIN`).
-  // Secrets survive `wrangler deploy`; plain vars are replaced by the config.
+  // The Express API is the Render service defined in ../render.yaml. The URL
+  // carries a suffix because the plain `notemind-api` hostname was taken.
+  // A plain var is enough: it is not a secret, and every GitHub deploy carries
+  // it, so a fresh checkout cannot forget to configure the proxy.
+  "vars": {
+    "API_ORIGIN": "https://notemind-api-7wc5.onrender.com"
+  },
+
   "observability": {
     "enabled": true
   }
