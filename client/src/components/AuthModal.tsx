@@ -41,8 +41,12 @@ export const AuthModal: React.FC = () => {
     resetForm();
   }, []);
 
-  const handleColdStartRetry = () => {
-    setInfoMessage('The API is waking up, retrying…');
+  const handleColdStartRetry = (attempt: number) => {
+    setInfoMessage(
+      attempt <= 1
+        ? 'The API is waking up, retrying…'
+        : 'Still waking up the API… this can take up to a minute.',
+    );
   };
 
   const handleSubmit = async (e: React.FormEvent) => {

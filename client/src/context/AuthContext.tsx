@@ -7,12 +7,16 @@ interface AuthContextType {
   user: User | null;
   token: string | null;
   isAuthenticated: boolean;
-  login: (email: string, password: string, onColdStartRetry?: () => void) => Promise<void>;
+  login: (
+    email: string,
+    password: string,
+    onColdStartRetry?: (attempt: number, maxAttempts: number) => void,
+  ) => Promise<void>;
   signup: (
     email: string,
     password: string,
     fullName?: string,
-    onColdStartRetry?: () => void,
+    onColdStartRetry?: (attempt: number, maxAttempts: number) => void,
   ) => Promise<void>;
   updateProfile: (updates: Partial<User>) => void;
   updatePassword: (currentPassword: string, newPassword: string) => Promise<void>;
@@ -58,7 +62,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return localStorage.getItem('notemind_token');
   });
 
-  const login = async (email: string, password: string, onColdStartRetry?: () => void) => {
+  const login = async (
+    email: string,
+    password: string,
+    onColdStartRetry?: (attempt: number, maxAttempts: number) => void,
+  ) => {
     const res = await apiFetch<{ token: string; user: User }>(
       '/auth/login',
       {
@@ -82,7 +90,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     email: string,
     password: string,
     fullName?: string,
-    onColdStartRetry?: () => void,
+    onColdStartRetry?: (attempt: number, maxAttempts: number) => void,
   ) => {
     const res = await apiFetch<{ token: string; user: User }>(
       '/auth/signup',

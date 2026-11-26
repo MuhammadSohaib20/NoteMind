@@ -4,28 +4,38 @@ const BASE_URL = '/api/v1';
 
 /**
  * Render's free tier sleeps after ~15 minutes idle. While the instance is
- * waking, Render's proxy can answer with its own HTML 502/503 page before the
- * Express app is listening. Only auth requests opt into this retry: a gateway
- * 502/503 means the request never reached the app, so retrying a login or
- * signup cannot duplicate work.
+ * waking, Render (or Cloudflare in front of it) can answer with an HTML
+ * gateway page before the Express app is listening. A real cold start can
+ * take close to a minute, so a single retry is not enough.
+ *
+ * Only auth requests opt into this loop. A non-JSON gateway response means the
+ * request never reached the app, so retrying a login or signup cannot
+ * duplicate work.
  */
 export interface ColdStartOptions {
   retryOnColdStart?: boolean;
-  onColdStartRetry?: () => void;
+  onColdStartRetry?: (attempt: number, maxAttempts: number) => void;
 }
 
-const COLD_START_RETRY_DELAY_MS = 5000;
+// Waits between attempts: 5s + 10s + 15s + 20s + 25s = up to 75s.
+const COLD_START_RETRY_DELAYS_MS = [5000, 10000, 15000, 20000, 25000];
+const COLD_START_DEADLINE_MS = 90000;
 const COLD_START_MESSAGE =
-  'The NoteMind API is still waking up. Please wait a moment, then try again.';
+  'The NoteMind API is still waking up. Please wait about a minute, then try again.';
+const TEMPORARY_ERROR_MESSAGE =
+  'The NoteMind API is temporarily unavailable. Please try again in a moment.';
 
-function isColdStartStatus(status: number): boolean {
-  return status === 502 || status === 503;
+// 5xx codes that a gateway can return while the instance is unreachable.
+const GATEWAY_STATUSES = new Set([500, 502, 503, 504, 520, 521, 522, 523, 524]);
+
+function isGatewayStatus(status: number): boolean {
+  return GATEWAY_STATUSES.has(status);
 }
 
 /**
  * Render's gateway answers with an HTML page (or an empty body) while the
- * instance wakes. A JSON 502/503 is a real answer from the API or Worker and
- * must not be retried.
+ * instance wakes. A JSON 5xx is a real answer from the API or Worker and must
+ * not be retried.
  */
 function isGatewayBody(text: string): boolean {
   const trimmed = text.trimStart();
@@ -37,6 +47,10 @@ function isGatewayBody(text: string): boolean {
   } catch {
     return true;
   }
+}
+
+function isGatewayResponse(status: number, text: string): boolean {
+  return isGatewayStatus(status) && isGatewayBody(text);
 }
 
 function delay(ms: number): Promise<void> {
@@ -62,16 +76,23 @@ export async function apiFetch<T>(
   const requestInit: RequestInit = { ...options, headers };
 
   try {
+    const startedAt = Date.now();
     let response = await fetch(`${BASE_URL}${endpoint}`, requestInit);
     let text = await response.text();
+    let retries = 0;
 
-    if (
+    while (
       coldStart.retryOnColdStart &&
-      isColdStartStatus(response.status) &&
-      isGatewayBody(text)
+      isGatewayResponse(response.status, text) &&
+      retries < COLD_START_RETRY_DELAYS_MS.length
     ) {
-      coldStart.onColdStartRetry?.();
-      await delay(COLD_START_RETRY_DELAY_MS);
+      const remaining = COLD_START_DEADLINE_MS - (Date.now() - startedAt);
+      if (remaining <= 0) break;
+
+      const waitMs = Math.min(COLD_START_RETRY_DELAYS_MS[retries], remaining);
+      retries += 1;
+      coldStart.onColdStartRetry?.(retries, COLD_START_RETRY_DELAYS_MS.length + 1);
+      await delay(waitMs);
       response = await fetch(`${BASE_URL}${endpoint}`, requestInit);
       text = await response.text();
     }
@@ -84,10 +105,10 @@ export async function apiFetch<T>(
         : {
             success: false,
             error: {
-              message: isColdStartStatus(response.status)
+              message: isGatewayResponse(response.status, text)
                 ? COLD_START_MESSAGE
-                : response.status === 500 || response.status === 504
-                  ? 'Unable to connect to NoteMind API server. Please ensure the backend server on port 3000 is running.'
+                : response.status >= 500 && isGatewayBody(text)
+                  ? TEMPORARY_ERROR_MESSAGE
                   : `Server returned empty response (HTTP ${response.status})`,
             },
           };
@@ -95,9 +116,11 @@ export async function apiFetch<T>(
       data = {
         success: false,
         error: {
-          message: isColdStartStatus(response.status)
+          message: isGatewayResponse(response.status, text)
             ? COLD_START_MESSAGE
-            : `Server response error (HTTP ${response.status}): ${text.slice(0, 120) || response.statusText || 'Invalid response'}`,
+            : response.status >= 500 && isGatewayBody(text)
+              ? TEMPORARY_ERROR_MESSAGE
+              : `Server response error (HTTP ${response.status}): ${text.slice(0, 120) || response.statusText || 'Invalid response'}`,
         },
       };
     }
