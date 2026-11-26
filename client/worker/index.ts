@@ -22,6 +22,10 @@ export interface Env {
 
 const API_PATHS = ["/api", "/health"] as const;
 
+// The query string makes keep-alive pings easy to spot in the API logs.
+const KEEPALIVE_PATH = "/health?keepalive=1";
+const KEEPALIVE_TIMEOUT_MS = 25_000;
+
 function isApiPath(pathname: string): boolean {
   return API_PATHS.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
@@ -78,5 +82,35 @@ export default {
     proxied.headers.set("X-Forwarded-Proto", url.protocol.replace(":", ""));
 
     return fetch(proxied);
+  },
+
+  /**
+   * Render's free tier spins a web service down after 15 minutes without
+   * inbound traffic; its own health checks do not reset that timer. This
+   * scheduled request is real inbound traffic and keeps the API awake.
+   */
+  async scheduled(
+    _controller: unknown,
+    env: Env,
+    ctx: { waitUntil(promise: Promise<unknown>): void },
+  ): Promise<void> {
+    if (!env.API_ORIGIN) return;
+
+    let target: URL;
+    try {
+      target = new URL(KEEPALIVE_PATH, env.API_ORIGIN);
+    } catch {
+      return;
+    }
+
+    ctx.waitUntil(
+      fetch(target.toString(), {
+        method: "GET",
+        signal: AbortSignal.timeout(KEEPALIVE_TIMEOUT_MS),
+      }).then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
   },
 };

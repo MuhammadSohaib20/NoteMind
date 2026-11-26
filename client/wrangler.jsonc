@@ -22,6 +22,14 @@
     "API_ORIGIN": "https://notemind-api-7wc5.onrender.com"
   },
 
+  // Render's free tier spins the API down after 15 minutes without inbound
+  // traffic. Render's own /health checks do not reset that timer. This cron
+  // sends a real request every 5 minutes, so the first login of the day does
+  // not pay a cold start. Cloudflare cron triggers are free.
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+
   "observability": {
     "enabled": true
   }
